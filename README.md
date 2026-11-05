@@ -1,0 +1,102 @@
+# SSHelf
+
+Schlanke SSH-Verbindungsverwaltung für Linux mit eingebautem Terminal: ein leichter Ersatz für
+Tabby, geschrieben in Rust. Ein einzelnes Binary von rund 10 MB, ohne GTK, Qt, Electron oder ein
+installiertes `ssh`.
+
+## Funktionen
+
+- Verbindungen anlegen, bearbeiten, duplizieren, löschen, suchen und in Gruppen ordnen
+- Felder: Name, Gruppe, Host, Port, Benutzer, Anmeldung, Schlüssel, Jump-Host, Keepalive,
+  Startbefehl, Notizen
+- Anmeldung per gespeichertem Schlüssel, Passwort, SSH-Agent oder Rückfrage (auch Einmalcodes)
+- Schlüssel importieren (Datei oder Einfügen; OpenSSH, PEM, PuTTY) oder Ed25519 neu erzeugen
+- Terminal mit Tabs, 10.000 Zeilen Verlauf, Maus-Unterstützung, Farben und Textauswahl
+- Prüfung der Hostschlüssel: Nachfrage beim ersten Mal, Sperre bei Änderung
+- Design in Nord-Farben: dunkel, hell oder wie das System
+- Auf Wunsch Symbol in der Statusleiste: Fenster schließen, Verbindungen laufen weiter
+
+## Starten
+
+    ./sshelf                     # Standard: ~/.local/share/sshelf/sshelf.db
+    ./sshelf --db pfad.db        # bestimmte Datenbank für diesen Start
+    ./sshelf --config datei.ini  # andere Konfigurationsdatei
+
+**Umzug auf einen anderen Rechner:** Binary und Datenbank kopieren. Liegt `sshelf.db` neben dem
+Binary und ist kein Pfad konfiguriert, wird sie automatisch verwendet (portabler Modus).
+
+## Konfiguration
+
+Der Datenbankpfad und die Statusleiste lassen sich in den Einstellungen ändern oder direkt in
+`~/.config/sshelf/config.ini` (Kommentare darin überschreibt die App beim Speichern):
+
+    [database]
+    path = ~/Nextcloud/sshelf.db
+
+    [window]
+    close_to_tray = true
+
+Reihenfolge für die Datenbank: `--db`, dann `path` aus der Datei, dann `sshelf.db` neben dem
+Programm, dann der Standardort. Fehlt eine konfigurierte Datei beim Start (zum Beispiel weil ein
+Laufwerk nicht eingehängt ist), zeigt die App eine Auswahl, statt still eine leere anzulegen.
+
+## Statusleiste
+
+Mit `close_to_tray` schließt das Fenster, das Programm läuft mit allen Verbindungen weiter. Ein
+Klick auf das Symbol öffnet das Fenster wieder, Beenden geht über dessen Menü. Der Tresor bleibt
+dabei entsperrt. Das Symbol nutzt StatusNotifierItem: KDE kann das direkt, GNOME braucht die
+Erweiterung „AppIndicator“. Gibt es keine solche Statusleiste, beendet das Schließen die Anwendung
+wie gewohnt, damit sie nie unerreichbar wird.
+
+## Sicherheit
+
+- Private Schlüssel, Passphrasen und Passwörter liegen mit XChaCha20-Poly1305 verschlüsselt in der
+  SQLite-Datei. Der Schlüssel dazu wird per Argon2id aus dem Master-Passwort abgeleitet.
+- **Ein vergessenes Master-Passwort kann nicht wiederhergestellt werden.**
+- Nicht verschlüsselt sind Namen, Hosts, Ports, Benutzer, Notizen, Startbefehle und bekannte Hosts.
+- Server können die Zwischenablage nicht lesen oder schreiben (OSC 52 ist abgeschaltet).
+
+## Tastenkürzel im Terminal
+
+| Taste | Wirkung |
+|---|---|
+| Strg+Umschalt+C / V | Kopieren / Einfügen (auch Umschalt+Einfg und Rechtsklick) |
+| Markieren, mittlere Maustaste | Markierten Text einfügen (Primary-Selection) |
+| Strg+Tab, Strg+Bild↑/↓ | Tab wechseln |
+| Strg+Umschalt+W | Tab schließen |
+| Umschalt+Bild↑/↓, Mausrad | Im Verlauf blättern |
+| Umschalt+Ziehen | Text auswählen, auch wenn ein Programm die Maus nutzt |
+
+## Systemvoraussetzungen
+
+Das Binary braucht glibc und lädt beim Start OpenGL/EGL, X11 oder Wayland sowie xkbcommon aus dem
+System. Auf normalen Linux-Desktops ist das alles vorhanden, auf einem reinen Server ohne Desktop
+nicht.
+
+Die nötige glibc-Version hängt vom Build ab:
+
+| Build | Mindestens | Läuft zum Beispiel auf |
+|---|---|---|
+| `cargo build --release` auf diesem System | glibc 2.35 | Ubuntu 22.04+, Debian 12+, aktuelle Rolling Releases |
+| `./build-portable.sh` (optional, braucht zig und cargo-zigbuild, bisher ungetestet) | glibc 2.28 | zusätzlich ältere Distributionen |
+
+CJK-Zeichen und manche Symbole (etwa ✓) kommen aus Systemschriften, falls vorhanden; sonst
+erscheint ein Kästchen. Ein Bedienungsproblem entsteht dadurch nicht.
+
+## Entwicklung
+
+    cargo test      # Unit- und End-to-End-Tests, braucht sshd, ssh-keygen, ssh-agent und eine GPU
+
+Mit `SSHELF_SHOTS=<ordner>` speichern die Oberflächentests Screenshots.
+
+| Datei | Inhalt |
+|---|---|
+| `src/vault.rs` | Verschlüsselung |
+| `src/store.rs` | SQLite-Datenbank |
+| `src/config.rs` | INI-Konfiguration, Datenbankpfad |
+| `src/tray.rs` | Symbol in der Statusleiste |
+| `src/keys.rs` | Schlüssel prüfen und erzeugen |
+| `src/ssh.rs` | Verbindungsaufbau, Anmeldung, Jump-Hosts |
+| `src/term.rs` | Terminal: Eingabe und Darstellung |
+| `src/app.rs` | Oberfläche |
+| `src/e2e_tests.rs` | End-to-End-Tests gegen einen echten `sshd` |

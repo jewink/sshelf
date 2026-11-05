@@ -1,0 +1,33 @@
+[package]
+name = "sshelf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.104"
+argon2 = "0.6.0"
+chacha20poly1305 = "0.11.0"
+directories = "6.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
+getrandom = "0.4.3"
+ksni = "0.3.7"
+parking_lot = "0.13.0"
+rand = "0.10"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+zeroize = "1.9.1"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
