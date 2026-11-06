@@ -586,7 +586,11 @@ fn fill(h: &mut Gui<'_>, index: usize, text: &str) {
 fn replace(h: &mut Gui<'_>, index: usize, text: &str) {
     focus_field(h, index);
     h.key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::COMMAND, Key::A);
-    h.event(egui::Event::Paste(text.to_owned()));
+    if text.is_empty() {
+        h.key_press(Key::Backspace);
+    } else {
+        h.event(egui::Event::Paste(text.to_owned()));
+    }
     settle(h);
 }
 
@@ -627,7 +631,7 @@ fn ui_icons_exist_in_builtin_fonts() {
     let ctx = egui::Context::default();
     let mut output = ctx.run_ui(Default::default(), |ui| {
         ui.fonts_mut(|f| {
-            for c in "🔑🔒🌓⚙🖧🔍✏▶📋🗑×+".chars() {
+            for c in "🔑🔒🌓⚙🖧🔍✏▶📋🗑×+«»".chars() {
                 assert!(f.has_glyph(&egui::FontId::proportional(14.0), c), "Symbol fehlt: {c}");
             }
         });
@@ -775,7 +779,7 @@ fn full_user_journey_through_the_gui() {
         type_line(&mut h, "clear");
         type_line(
             &mut h,
-            r#"printf '\e[1mFett\e[0m \e[3mKursiv\e[0m \e[4mUnterstrichen\e[0m \e[9mDurch\e[0m \e[2mBlass\e[0m \e[7mInvers\e[0m\n'; for i in 0 1 2 3 4 5 6 7; do printf '\e[4%dm  \e[0m' $i; done; for i in 0 1 2 3 4 5 6 7; do printf '\e[10%dm  \e[0m' $i; done; echo; for i in 1 2 3 4 5 6; do printf '\e[3%dmFarbe%d \e[0m' $i $i; done; echo; printf '┌────────┬───────┐\n│ Umlaut │ äöüß€ │\n├────────┼───────┤\n│ Breit  │ 日本語│\n└────────┴───────┘\n▀▄█░▒▓ ✓ → λ\n'; ls --color=always -la / | head -8; echo fertig-$((40+2))"#,
+            r#"printf '\e[1mFett\e[0m \e[3mKursiv\e[0m \e[4mUnterstrichen\e[0m \e[9mDurch\e[0m \e[2mBlass\e[0m \e[7mInvers\e[0m\n'; for i in 0 1 2 3 4 5 6 7; do printf '\e[4%dm  \e[0m' $i; done; for i in 0 1 2 3 4 5 6 7; do printf '\e[10%dm  \e[0m' $i; done; echo; for i in 1 2 3 4 5 6; do printf '\e[3%dmFarbe%d \e[0m' $i $i; done; echo; printf '┌────────┬───────┐\n│ Umlaut │ äöüß€ │\n├────────┼───────┤\n│ Breit  │ 日本語│\n└────────┴───────┘\n▀▄█░▒▓ ✓ → λ\n'; printf '[+] Pulling 3/3\n \e[32m✔\e[0m redis Pulled\n \e[34m⠋\e[0m web  Pulling\n \e[34m⠼\e[0m db   Downloading\n \e[31m✘\e[0m alt  Error\n'; ls --color=always -la / | head -8; echo fertig-$((40+2))"#,
         );
         wait_for_text(&mut h, "fertig-42");
         shot(&mut h, "06-terminal-dunkel");
@@ -858,7 +862,8 @@ fn full_user_journey_through_the_gui() {
 
 #[test]
 fn tray_icon_is_valid_and_can_be_inspected() {
-    let (size, rgba) = crate::tray::icon_rgba();
+    let size = 256;
+    let rgba = crate::desktop::rgba(size);
     assert_eq!(rgba.len(), (size * size * 4) as usize);
     assert_eq!(&rgba[0..4], &[0, 0, 0, 0], "Ecken sind durchsichtig");
     if let Some(dir) = std::env::var_os("SSHELF_SHOTS") {
@@ -876,13 +881,20 @@ fn setup_with_connection(h: &mut Gui<'_>, name: &str) {
 }
 
 fn create_connection(h: &mut Gui<'_>, name: &str, jump: Option<&str>) {
+    create_connection_in(h, name, jump, None);
+}
+
+fn create_connection_in(h: &mut Gui<'_>, name: &str, jump: Option<&str>, group: Option<&str>) {
     click(h, "+ Neu");
     fill(h, 1, name);
+    if let Some(group) = group {
+        fill(h, 2, group);
+    }
     fill(h, 3, "127.0.0.1");
     click(h, "Nachfragen");
     if let Some(jump) = jump {
-        // Bei dieser Anmeldeart ist die Jump-Host-Auswahl die einzige Auswahlliste.
-        h.get_by_role(Role::ComboBox).click();
+        // Bei dieser Anmeldeart ist die Jump-Host-Auswahl die letzte Auswahlliste.
+        h.get_all_by_role(Role::ComboBox).last().unwrap().click();
         settle(h);
         h.get_all_by_label(jump).last().unwrap().click();
         settle(h);
@@ -1037,7 +1049,7 @@ fn missing_configured_database_shows_a_choice_instead_of_creating_one() {
     let dir = temp_dir("missing");
     let missing = dir.join("nicht/eingehaengt/sshelf.db");
     let config_path = dir.join("config.ini");
-    let config = Config { db_path: Some(missing.clone()), close_to_tray: false };
+    let config = Config { db_path: Some(missing.clone()), ..Default::default() };
     config.save(&config_path).unwrap();
     let start = App::open_start_db(missing.clone(), Source::Config);
     let app_ = App::new(start, config_path.clone(), config, Source::Config).unwrap();
@@ -1069,6 +1081,140 @@ fn tray_setting_is_saved_in_the_ini_file() {
     assert!(Config::load(&dir.join("config.ini")).unwrap().close_to_tray);
     click(&mut h, "Beim Schließen in die Statusleiste minimieren");
     assert!(!Config::load(&dir.join("config.ini")).unwrap().close_to_tray);
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn groups_collapse_and_can_be_picked_in_the_editor() {
+    let dir = temp_dir("groups");
+    let db = dir.join("sshelf.db");
+    let mut h = gui(&db, true);
+    setup_with_connection(&mut h, "Ohne");
+    create_connection_in(&mut h, "Web 1", None, Some("Kunde A"));
+    create_connection_in(&mut h, "Web 2", None, Some("Kunde A"));
+    create_connection_in(&mut h, "Mail", None, Some("Kunde B"));
+
+    // Vorhandene Gruppe aus der Liste übernehmen.
+    click(&mut h, "+ Neu");
+    fill(&mut h, 1, "Web 3");
+    fill(&mut h, 3, "127.0.0.1");
+    click(&mut h, "Nachfragen");
+    h.get_all_by_role(Role::ComboBox).next().unwrap().click();
+    settle(&mut h);
+    shot(&mut h, "25-gruppe-waehlen");
+    h.get_all_by_label("Kunde B").last().unwrap().click();
+    settle(&mut h);
+    click(&mut h, "Speichern");
+    let web3 = app(&h).test_connections().iter().find(|c| c.name == "Web 3").unwrap().clone();
+    assert_eq!(web3.group, "Kunde B");
+
+    // Gruppe zuklappen: Einträge verschwinden, andere bleiben, Zustand wird gespeichert.
+    click(&mut h, "Gruppe Kunde A");
+    assert!(h.query_by_label("Web 1").is_none());
+    assert!(h.query_by_label("Mail").is_some() && h.query_by_label("Ohne").is_some());
+    shot(&mut h, "26-gruppe-zu");
+    // Die Suche zeigt Treffer trotzdem.
+    fill(&mut h, 0, "web 2");
+    assert!(h.query_by_label("Web 2").is_some());
+    replace(&mut h, 0, "");
+    assert!(h.query_by_label("Web 2").is_none());
+    drop(h);
+
+    let mut h = gui(&db, true);
+    settle(&mut h);
+    fill(&mut h, 0, "master-passwort");
+    click(&mut h, "Entsperren");
+    assert!(h.query_by_label("Web 1").is_none(), "zugeklappt bleibt zugeklappt");
+    click(&mut h, "Gruppe Kunde A");
+    assert!(h.query_by_label("Web 1").is_some());
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sidebar_collapses_resizes_and_remembers() {
+    let dir = temp_dir("sidebar");
+    let db = dir.join("sshelf.db");
+    let mut h = gui(&db, true);
+    setup_with_connection(&mut h, "Eins");
+    let sidebar = h.get_by_label("Eins").rect();
+    assert!(sidebar.width() > 200.0);
+
+    // Breite mit der Maus am rechten Rand ziehen.
+    let edge = egui::pos2(272.0, 400.0);
+    h.hover_at(edge);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for x in [300.0, 330.0, 360.0] {
+        h.hover_at(egui::pos2(x, 400.0));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: egui::pos2(360.0, 400.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    let width = app(&h).test_config().sidebar_width.unwrap();
+    assert!((340.0..=380.0).contains(&width), "Breite nach dem Ziehen: {width}");
+
+    // Einklappen: nur noch Symbole, Name als Tooltip; Ausklappen bringt alles zurück.
+    click(&mut h, "«");
+    assert!(app(&h).test_config().sidebar_collapsed);
+    assert!(h.query_by_label("Suchen…").is_none());
+    assert!(h.query_by_label("Eins").is_some(), "Verbindung als Symbol vorhanden");
+    shot(&mut h, "27-seitenleiste-zu");
+    let a = h.into_state().unwrap();
+    let config = Config::load(&dir.join("config.ini")).unwrap();
+    assert!(config.sidebar_collapsed, "Einklappen wird sofort gespeichert");
+    let mut h = window(a, true);
+    settle(&mut h);
+    click(&mut h, "»");
+    assert!(!app(&h).test_config().sidebar_collapsed);
+    let mut a = h.into_state().unwrap();
+    a.detach();
+    let config = Config::load(&dir.join("config.ini")).unwrap();
+    assert!((340.0..=380.0).contains(&config.sidebar_width.unwrap()), "Breite gespeichert");
+    drop(a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn window_state_keeps_normal_size_while_maximized() {
+    use crate::app::track_window;
+    use crate::config::WindowState;
+    let mut state = WindowState::default();
+    // Wie unter Wayland: ohne inner_rect, die Größe kommt von der Zeichenfläche.
+    let mut info = egui::ViewportInfo {
+        outer_rect: Some(egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1300.0, 850.0))),
+        maximized: Some(false),
+        ..Default::default()
+    };
+    track_window(&mut state, &info, egui::vec2(1300.0, 820.0));
+    assert_eq!(state, WindowState { width: Some(1300.0), height: Some(820.0), x: Some(100.0), y: Some(50.0), maximized: false });
+    info.maximized = Some(true);
+    track_window(&mut state, &info, egui::vec2(3440.0, 1380.0));
+    assert!(state.maximized);
+    assert_eq!(state.width, Some(1300.0), "normale Größe bleibt für das Wiederherstellen");
+    // Wayland: keine Position, der alte Wert bleibt stehen.
+    info.maximized = Some(false);
+    info.outer_rect = None;
+    track_window(&mut state, &info, egui::vec2(1300.0, 820.0));
+    assert_eq!((state.x, state.y), (Some(100.0), Some(50.0)));
+}
+
+#[test]
+fn desktop_entry_can_be_installed_from_settings() {
+    let dir = temp_dir("desk");
+    let mut h = gui(&dir.join("sshelf.db"), true);
+    setup_with_connection(&mut h, "Eins");
+    h.state_mut().as_mut().unwrap().test_set_desktop(crate::desktop::Locations::under(&dir.join("share")));
+    click(&mut h, "Einstellungen");
+    click(&mut h, "Ins Anwendungsmenü eintragen");
+    let loc = crate::desktop::Locations::under(&dir.join("share"));
+    assert_eq!(loc.installed_exe(), Some(std::env::current_exe().unwrap()));
+    h.get_by_label_contains("Eingetragen:");
+    shot(&mut h, "28-einstellungen-symbol");
+    click(&mut h, "Eintrag entfernen");
+    assert_eq!(loc.installed_exe(), None);
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);
 }

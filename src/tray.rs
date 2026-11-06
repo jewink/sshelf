@@ -172,27 +172,7 @@ pub fn start(rt: &tokio::runtime::Runtime, state: &Arc<TrayState>) -> Result<Tra
     }
 }
 
-/// Programmsymbol: blaues Quadrat (nord10) mit Eingabezeichen „>_“. Kantenlänge und RGBA-Pixel.
+/// Programmsymbol für die Statusleiste: Kantenlänge und RGBA-Pixel.
 pub fn icon_rgba() -> (u32, Vec<u8>) {
-    const SIZE: i32 = 64;
-    const BLUE: [u8; 4] = [0x5e, 0x81, 0xac, 0xff];
-    const LIGHT: [u8; 4] = [0xec, 0xef, 0xf4, 0xff];
-    let mut out = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            // Abgerundete Ecken mit Radius 12.
-            let (dx, dy) = ((11 - x).max(x - 52).max(0), (11 - y).max(y - 52).max(0));
-            let inside = dx * dx + dy * dy <= 144;
-            // Spitze Klammer: zwei Schrägen, die sich bei (31, 30) treffen.
-            let chevron = (14..=31).contains(&x) && (y - 30).abs() >= 31 - x - 3 && (y - 30).abs() <= 31 - x + 3;
-            let underscore = (34..=52).contains(&x) && (44..=49).contains(&y);
-            let pixel = match (inside, chevron || underscore) {
-                (false, _) => [0, 0, 0, 0],
-                (true, true) => LIGHT,
-                (true, false) => BLUE,
-            };
-            out.extend_from_slice(&pixel);
-        }
-    }
-    (SIZE as u32, out)
+    (64, crate::desktop::rgba(64))
 }

@@ -1,6 +1,7 @@
 //! Die Oberfläche: Sperrbildschirm, Seitenleiste, Tabs und alle Formulare.
 
-use crate::config::{self, Config, Source};
+use crate::config::{self, Config, Source, WindowState};
+use crate::desktop;
 use crate::keys;
 use crate::ssh::{self, Cmd, Hop, HopAuth, Plan};
 use crate::store::{AuthKind, ConnectionRec, KeyRec, KnownHost, PasswordChange, Store};
@@ -14,7 +15,7 @@ use eframe::egui::{
     Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +23,8 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 const MIN_PASSWORD: usize = 8;
+const SIDEBAR_MIN: f32 = 220.0;
+const SIDEBAR_MAX: f32 = 560.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -170,7 +173,12 @@ pub struct App {
     tray: Option<TrayHandle>,
     tray_error: Option<String>,
     hide_on_close: bool,
-    window_size: Vec2,
+    /// Zuletzt gespeicherter Fensterzustand, um unnötiges Schreiben zu vermeiden.
+    saved_config: Config,
+    collapsed_groups: BTreeSet<String>,
+    desktop: Option<desktop::Locations>,
+    /// Abgelegter Starter neben dem Programm (Hinweis in den Einstellungen).
+    launcher: Option<PathBuf>,
 }
 
 fn avatar_color(name: &str) -> Color32 {
@@ -293,6 +301,30 @@ fn secret_field(ui: &mut Ui, value: &mut String, hint: &str) -> egui::Response {
     )
 }
 
+/// Übernimmt Größe, Position und Maximierung aus egui. Im maximierten Zustand bleibt die normale
+/// Größe erhalten, damit das Fenster beim nächsten Start richtig wiederhergestellt wird.
+///
+/// `size` ist die Zeichenfläche: Unter Wayland liefert egui-winit `inner_rect` nicht, weil es dort
+/// keine Fensterposition gibt.
+pub fn track_window(state: &mut WindowState, info: &egui::ViewportInfo, size: Vec2) {
+    if let Some(maximized) = info.maximized {
+        state.maximized = maximized;
+    }
+    let special = state.maximized || info.fullscreen == Some(true) || info.minimized == Some(true);
+    if special {
+        return;
+    }
+    if size.x >= 1.0 && size.y >= 1.0 {
+        state.width = Some(size.x.round());
+        state.height = Some(size.y.round());
+    }
+    // Unter Wayland gibt es keine Position; dann bleibt der alte Wert stehen.
+    if let Some(outer) = info.outer_rect {
+        state.x = Some(outer.min.x.round());
+        state.y = Some(outer.min.y.round());
+    }
+}
+
 fn stored_font_size(store: &Store) -> f32 {
     store.get_setting("font_size").and_then(|s| s.parse().ok()).unwrap_or(14.0f32).clamp(9.0, 28.0)
 }
@@ -383,8 +415,12 @@ impl App {
             tray: None,
             tray_error: None,
             hide_on_close: false,
-            window_size: Vec2::new(1180.0, 760.0),
+            saved_config: Config::default(),
+            collapsed_groups: BTreeSet::new(),
+            desktop: desktop::Locations::user().ok(),
+            launcher: None,
         };
+        app.saved_config = app.config.clone();
         if app.config.close_to_tray {
             app.start_tray();
         }
@@ -407,6 +443,7 @@ impl App {
 
     /// Das Fenster ist zu; bis zum nächsten gibt es nichts neu zu zeichnen.
     pub fn detach(&mut self) {
+        self.persist_layout();
         self.tray_state.set_ctx(None);
         for s in &self.sessions {
             s.shared.set_repaint(None);
@@ -422,8 +459,35 @@ impl App {
         self.hide_on_close && self.tray_state.is_alive() && !self.tray_state.quit_requested()
     }
 
-    pub fn window_size(&self) -> Vec2 {
-        self.window_size
+    /// Fenster mit der zuletzt verwendeten Größe (und unter X11 Position) öffnen.
+    pub fn viewport_builder(&self, icon: &[u8]) -> egui::ViewportBuilder {
+        let w = &self.config.window;
+        let size = Vec2::new(
+            w.width.unwrap_or(1180.0).clamp(720.0, 10_000.0),
+            w.height.unwrap_or(760.0).clamp(460.0, 10_000.0),
+        );
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("SSHelf")
+            .with_app_id("sshelf")
+            .with_icon(egui::IconData { rgba: icon.to_vec(), width: 128, height: 128 })
+            .with_inner_size(size)
+            .with_min_inner_size([720.0, 460.0])
+            .with_maximized(w.maximized);
+        if let (Some(x), Some(y)) = (w.x, w.y) {
+            builder = builder.with_position([x, y]);
+        }
+        builder
+    }
+
+    /// Speichert Fenster- und Seitenleistenzustand, wenn er sich geändert hat.
+    pub fn persist_layout(&mut self) {
+        if self.config == self.saved_config {
+            return;
+        }
+        match self.config.save(&self.config_path) {
+            Ok(()) => self.saved_config = self.config.clone(),
+            Err(e) => eprintln!("Fehler: {e:#}"),
+        }
     }
 
     fn start_tray(&mut self) {
@@ -460,15 +524,17 @@ impl App {
             self.stop_tray();
         }
         let saved = self.config.save(&self.config_path);
+        if saved.is_ok() {
+            self.saved_config = self.config.clone();
+        }
         self.report(saved);
     }
 
     /// Fenster schließen, Statusleiste und Fenstergröße: läuft in jedem Frame, auch im gesperrten Zustand.
     fn handle_window_events(&mut self, ui: &Ui) {
         let ctx = ui.ctx();
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
-            self.window_size = rect.size();
-        }
+        let (info, size) = ctx.input(|i| (i.viewport().clone(), i.viewport_rect().size()));
+        track_window(&mut self.config.window, &info, size);
         if self.tray_state.quit_requested() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if self.tray_state.take_show_request() {
@@ -507,6 +573,7 @@ impl App {
         config.db_path = Some(path);
         config.save(&self.config_path)?;
         self.config = config;
+        self.saved_config = self.config.clone();
         self.use_store(new)?;
         self.notify(
             match mode {
@@ -669,6 +736,26 @@ impl App {
             self.keys = k;
             self.known_hosts = h;
         }
+        self.collapsed_groups = self
+            .store
+            .lock()
+            .get_setting("collapsed_groups")
+            .map(|s| s.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+            .unwrap_or_default();
+    }
+
+    fn toggle_group(&mut self, group: &str) {
+        if !self.collapsed_groups.remove(group) {
+            self.collapsed_groups.insert(group.to_owned());
+        }
+        let joined = self.collapsed_groups.iter().cloned().collect::<Vec<_>>().join("\n");
+        let r = self.store.lock().set_setting("collapsed_groups", &joined);
+        self.report(r);
+    }
+
+    fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        self.config.sidebar_collapsed = collapsed;
+        self.persist_layout();
     }
 
     // --- Tresor ----------------------------------------------------------------------------
@@ -905,6 +992,13 @@ impl App {
             ui.label(RichText::new("SSHelf").size(19.0).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
+                    .add(egui::Button::new(RichText::new("«").size(16.0)).frame(false))
+                    .on_hover_text("Seitenleiste einklappen")
+                    .clicked()
+                {
+                    self.set_sidebar_collapsed(true);
+                }
+                if ui
                     .add(primary_button(c, "+ Neu"))
                     .on_hover_text("Neue Verbindung anlegen")
                     .clicked()
@@ -1010,16 +1104,164 @@ impl App {
             return;
         }
         let mut last_group: Option<&str> = None;
+        let mut toggle = None;
         for rec in &visible {
-            if last_group != Some(rec.group.as_str()) {
-                last_group = Some(rec.group.as_str());
-                if !rec.group.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(rec.group.to_uppercase()).size(11.0).strong().color(c.muted));
+            let group = rec.group.as_str();
+            if last_group != Some(group) {
+                last_group = Some(group);
+                if !group.is_empty() {
+                    let count = visible.iter().filter(|r| r.group == group).count();
+                    let collapsed = self.collapsed_groups.contains(group);
+                    if self.ui_group_header(ui, c, group, count, collapsed).clicked() {
+                        toggle = Some(group.to_owned());
+                    }
                 }
             }
-            self.ui_connection_row(ui, c, rec, dark);
+            // Bei einer Suche werden alle Treffer gezeigt, auch in zugeklappten Gruppen.
+            if group.is_empty() || !query.is_empty() || !self.collapsed_groups.contains(group) {
+                self.ui_connection_row(ui, c, rec, dark);
+            }
         }
+        if let Some(g) = toggle {
+            self.toggle_group(&g);
+        }
+    }
+
+    fn ui_group_header(&self, ui: &mut Ui, c: &Colors, group: &str, count: usize, collapsed: bool) -> egui::Response {
+        ui.add_space(2.0);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Gruppe {group}")));
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 6.0, c.panel);
+        }
+        // Dreieck: zeigt nach rechts (zu) oder unten (offen).
+        let center = rect.left_center() + Vec2::new(10.0, 0.0);
+        let points = if collapsed {
+            vec![center + Vec2::new(-2.5, -4.0), center + Vec2::new(3.0, 0.0), center + Vec2::new(-2.5, 4.0)]
+        } else {
+            vec![center + Vec2::new(-4.0, -2.5), center + Vec2::new(4.0, -2.5), center + Vec2::new(0.0, 3.0)]
+        };
+        ui.painter().add(egui::Shape::convex_polygon(points, c.muted, Stroke::NONE));
+        ui.painter().text(
+            rect.left_center() + Vec2::new(22.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            group.to_uppercase(),
+            FontId::proportional(11.5),
+            c.muted,
+        );
+        ui.painter().text(
+            rect.right_center() - Vec2::new(8.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            FontId::proportional(11.5),
+            c.muted,
+        );
+        resp
+    }
+
+    /// Eingeklappte Seitenleiste: nur Symbole, Namen als Tooltip.
+    fn ui_sidebar_rail(&mut self, ui: &mut Ui, c: &Colors, dark: bool) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(2.0);
+            if ui
+                .add(egui::Button::new(RichText::new("»").size(16.0)).frame(false))
+                .on_hover_text("Seitenleiste ausklappen")
+                .clicked()
+            {
+                self.set_sidebar_collapsed(false);
+            }
+            if ui.add(primary_button(c, "+")).on_hover_text("Neue Verbindung").clicked() {
+                self.open_editor(ConnectionRec::default());
+            }
+            ui.add_space(4.0);
+        });
+        let nav_height = 150.0;
+        let list_height = (ui.available_height() - nav_height).max(40.0);
+        let list = self.connections.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("rail")
+            .max_height(list_height)
+            .min_scrolled_height(list_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    for rec in &list {
+                        self.ui_rail_avatar(ui, c, rec, dark);
+                    }
+                });
+            });
+        ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let icon = |text: &str| egui::Button::new(RichText::new(text).size(15.0)).frame(false).min_size(Vec2::splat(30.0));
+            if ui.add(icon("🔒")).on_hover_text("Sperren").clicked() {
+                self.lock();
+            }
+            if ui.add(icon("⚙")).on_hover_text("Einstellungen").clicked() {
+                self.open_page(Page::Settings);
+            }
+            if ui.add(icon("🖧")).on_hover_text("Bekannte Hosts").clicked() {
+                self.open_page(Page::KnownHosts);
+            }
+            if ui.add(icon("🔑")).on_hover_text("Schlüssel").clicked() {
+                self.open_page(Page::Keys);
+            }
+            ui.separator();
+        });
+    }
+
+    fn ui_rail_avatar(&mut self, ui: &mut Ui, c: &Colors, rec: &ConnectionRec, dark: bool) {
+        let id = rec.id.unwrap_or_default();
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 40.0), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, rec.name.clone()));
+        let open = self.sessions.iter().any(|s| s.conn_id == id && s.shared.status() == Status::Connected);
+        let selected = self.active.is_some_and(|a| self.sessions.iter().any(|s| s.id == a && s.conn_id == id));
+        if selected {
+            ui.painter().rect_filled(rect, 8.0, c.accent_soft);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(rect, 8.0, c.panel);
+        }
+        let center = rect.center();
+        ui.painter().circle_filled(center, 15.0, avatar_color(&rec.name));
+        let initial = rec.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+        ui.painter().text(center, egui::Align2::CENTER_CENTER, initial, FontId::proportional(14.0), Color32::WHITE);
+        if open {
+            ui.painter().circle(center + Vec2::new(11.0, 11.0), 4.5, c.success, Stroke::new(1.5, c.sidebar));
+        }
+        let resp = resp.on_hover_text(format!("{}\n{}@{}:{}", rec.name, rec.username, rec.host, rec.port));
+        if resp.double_clicked() {
+            self.connect(id, dark);
+        } else if resp.clicked()
+            && let Some(s) = self.sessions.iter().rev().find(|s| s.conn_id == id)
+        {
+            self.active = Some(s.id);
+        }
+        self.connection_menu(&resp, c, rec, dark);
+    }
+
+    fn connection_menu(&mut self, resp: &egui::Response, c: &Colors, rec: &ConnectionRec, dark: bool) {
+        let id = rec.id.unwrap_or_default();
+        resp.context_menu(|ui| {
+            if ui.button("▶  Verbinden").clicked() {
+                self.connect(id, dark);
+                ui.close();
+            }
+            if ui.button("✏  Bearbeiten").clicked() {
+                self.open_editor(rec.clone());
+                ui.close();
+            }
+            if ui.button("📋  Duplizieren").clicked() {
+                let r = self.store.lock().duplicate_connection(id);
+                self.report(r);
+                self.reload();
+                ui.close();
+            }
+            ui.separator();
+            if ui.add(danger_button(c, "🗑  Löschen")).clicked() {
+                self.confirm = Some(Confirm::DeleteConnection(id, rec.name.clone()));
+                ui.close();
+            }
+        });
     }
 
     fn ui_connection_row(&mut self, ui: &mut Ui, c: &Colors, rec: &ConnectionRec, dark: bool) {
@@ -1097,27 +1339,7 @@ impl App {
                 self.active = Some(s.id);
             }
         }
-        resp.context_menu(|ui| {
-            if ui.button("▶  Verbinden").clicked() {
-                self.connect(id, dark);
-                ui.close();
-            }
-            if ui.button("✏  Bearbeiten").clicked() {
-                self.open_editor(rec.clone());
-                ui.close();
-            }
-            if ui.button("📋  Duplizieren").clicked() {
-                let r = self.store.lock().duplicate_connection(id);
-                self.report(r);
-                self.reload();
-                ui.close();
-            }
-            ui.separator();
-            if ui.add(danger_button(c, "🗑  Löschen")).clicked() {
-                self.confirm = Some(Confirm::DeleteConnection(id, rec.name.clone()));
-                ui.close();
-            }
-        });
+        self.connection_menu(&resp, c, rec, dark);
     }
 
     // --- Tab-Leiste ------------------------------------------------------------------------
@@ -1413,6 +1635,14 @@ impl App {
             .filter_map(|o| o.id.map(|id| (id, o.name.clone())))
             .collect();
         let key_list = self.keys.clone();
+        let groups: Vec<String> = self
+            .connections
+            .iter()
+            .map(|c| c.group.clone())
+            .filter(|g| !g.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         // Eine alte Fehlermeldung verschwindet, sobald weitergetippt wird.
         if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Paste(_)))) {
             ed.error = None;
@@ -1449,7 +1679,31 @@ impl App {
                     text_field(ui, &mut ed.rec.name, "z. B. Webserver Produktion");
                 }, |ui| {
                     field_label(ui, c, "Gruppe (optional)");
-                    text_field(ui, &mut ed.rec.group, "z. B. Kunde A");
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let width = if groups.is_empty() { ui.available_width() } else { ui.available_width() - 46.0 };
+                        ui.add(
+                            TextEdit::singleline(&mut ed.rec.group)
+                                .hint_text(if groups.is_empty() { "z. B. Kunde A" } else { "Neue Gruppe oder rechts wählen" })
+                                .margin(Margin::symmetric(8, 6))
+                                .desired_width(width),
+                        );
+                        if !groups.is_empty() {
+                            egui::ComboBox::from_id_salt("group_pick")
+                                .selected_text("")
+                                .width(40.0)
+                                .height(300.0)
+                                .show_ui(ui, |ui| {
+                                    for g in &groups {
+                                        if ui.selectable_label(ed.rec.group == *g, g).clicked() {
+                                            ed.rec.group = g.clone();
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text("Vorhandene Gruppe wählen");
+                        }
+                    });
                 });
                 split(ui, 0.62, |ui| {
                     field_label(ui, c, "Host");
@@ -1707,6 +1961,10 @@ impl App {
         let tray_problem = self.config.close_to_tray && !self.tray_state.is_alive();
         let tray_error = self.tray_error.clone();
         let (mut tray_changed, mut apply_db, mut pick_db, mut standard_db) = (false, false, false, false);
+        let exe = std::env::current_exe().ok();
+        let installed = self.desktop.as_ref().and_then(|d| d.installed_exe());
+        let launcher = self.launcher.clone();
+        let (mut install, mut uninstall, mut place_launcher) = (false, false, false);
         let db_form = &mut self.db_form;
         let mut theme_choice = self.theme;
         let mut font_size = self.font_size;
@@ -1737,6 +1995,30 @@ impl App {
                         "Es steht gerade keine Statusleiste bereit, das Schließen beendet die Anwendung{detail}. Unter GNOME ist dafür die Erweiterung „AppIndicator“ nötig."
                     )).size(12.5).color(c.warning));
                 }
+            });
+            ui.add_space(8.0);
+            soft_card(c).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("Programmsymbol und Anwendungsmenü").strong());
+                let status = match (&installed, &exe) {
+                    (None, _) => "Noch nicht im Anwendungsmenü eingetragen.".to_owned(),
+                    (Some(p), Some(e)) if p == e => "Eingetragen: SSHelf erscheint mit Symbol im Anwendungsmenü und in der Fensterleiste.".to_owned(),
+                    (Some(p), _) => format!("Der Eintrag zeigt auf {}, nicht auf dieses Programm.", p.display()),
+                };
+                ui.label(RichText::new(status).size(12.5));
+                ui.horizontal(|ui| {
+                    let current = installed.is_some() && installed == exe;
+                    let label = if installed.is_some() && !current { "Eintrag aktualisieren" } else { "Ins Anwendungsmenü eintragen" };
+                    install = ui.add_enabled(!current && exe.is_some(), primary_button(c, label)).clicked();
+                    uninstall = ui.add_enabled(installed.is_some(), egui::Button::new("Eintrag entfernen")).clicked();
+                    place_launcher = ui.add_enabled(exe.is_some(), egui::Button::new("Starter neben dem Programm ablegen")).clicked();
+                });
+                if let Some(l) = &launcher {
+                    ui.label(RichText::new(format!("Angelegt: {}", l.display())).size(12.5).color(c.success));
+                }
+                ui.label(RichText::new(
+                    "Unter Linux kann die Programmdatei selbst kein Symbol tragen, der Dateimanager zeigt dafür immer das Symbol für ausführbare Dateien. Der Starter „SSHelf.desktop“ neben dem Programm erscheint dagegen mit Symbol und startet SSHelf per Klick."
+                ).size(12.5).color(c.muted));
             });
             ui.add_space(8.0);
             soft_card(c).show(ui, |ui| {
@@ -1779,6 +2061,23 @@ impl App {
         });
         if tray_changed {
             self.set_close_to_tray(close_to_tray);
+        }
+        let (installed_now, launched) = match (self.desktop.as_ref(), exe.as_ref()) {
+            (Some(loc), Some(exe)) => (install.then(|| loc.install(exe)), place_launcher.then(|| loc.write_launcher_next_to(exe))),
+            _ => (None, None),
+        };
+        if let Some(r) = installed_now
+            && self.report(r).is_some()
+        {
+            self.notify("Im Anwendungsmenü eingetragen", false);
+        }
+        if let Some(r) = launched
+            && let Some(path) = self.report(r)
+        {
+            self.launcher = Some(path);
+        }
+        if uninstall && let Some(r) = self.desktop.as_ref().map(|loc| loc.uninstall()) && self.report(r).is_some() {
+            self.notify("Eintrag entfernt", false);
         }
         if apply_db {
             self.request_db_change();
@@ -2113,11 +2412,22 @@ impl App {
             self.handle_shortcuts(ui);
         }
 
-        egui::Panel::left("sidebar")
-            .exact_size(272.0)
-            .resizable(false)
-            .frame(Frame::new().fill(c.sidebar).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, c.border)))
-            .show(ui, |ui| self.ui_sidebar(ui, &c, dark));
+        let sidebar_frame = Frame::new().fill(c.sidebar).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, c.border));
+        if self.config.sidebar_collapsed {
+            egui::Panel::left("sidebar_rail")
+                .exact_size(64.0)
+                .resizable(false)
+                .frame(sidebar_frame.inner_margin(Margin::symmetric(6, 12)))
+                .show(ui, |ui| self.ui_sidebar_rail(ui, &c, dark));
+        } else {
+            let shown = egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(self.config.sidebar_width.unwrap_or(272.0).clamp(SIDEBAR_MIN, SIDEBAR_MAX))
+                .size_range(SIDEBAR_MIN..=SIDEBAR_MAX)
+                .frame(sidebar_frame)
+                .show(ui, |ui| self.ui_sidebar(ui, &c, dark));
+            self.config.sidebar_width = Some(shown.response.rect.width().round());
+        }
 
         if !self.sessions.is_empty() {
             egui::Panel::top("tabs")
@@ -2196,6 +2506,12 @@ impl App {
     }
     pub fn test_has_problem(&self) -> bool {
         self.db_problem.is_some()
+    }
+    pub fn test_config(&self) -> &Config {
+        &self.config
+    }
+    pub fn test_set_desktop(&mut self, loc: desktop::Locations) {
+        self.desktop = Some(loc);
     }
     pub fn test_session_count(&self) -> usize {
         self.sessions.len()

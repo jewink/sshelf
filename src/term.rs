@@ -424,12 +424,73 @@ fn block_rects(c: char) -> Option<(&'static [[f32; 4]], f32)> {
     })
 }
 
+/// Punktmuster der Braille-Zeichen U+2800..U+28FF. Viele Programme nutzen sie für Spinner
+/// (z. B. `docker compose pull`: ⠋⠙⠹⠸…) oder feine Grafiken (btop). Die eingebauten Schriften
+/// haben sie nicht, darum werden sie selbst gezeichnet.
+fn braille_dots(c: char) -> Option<u8> {
+    let v = c as u32;
+    (0x2800..=0x28ff).contains(&v).then(|| (v - 0x2800) as u8)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mark {
+    Check,
+    HeavyCheck,
+    Cross,
+    HeavyCross,
+}
+
+/// Haken und Kreuze, mit denen Werkzeuge Erfolg und Fehler melden (✔ / ✘ bei docker compose).
+fn mark(c: char) -> Option<Mark> {
+    Some(match c {
+        '✓' => Mark::Check,
+        '✔' => Mark::HeavyCheck,
+        '✗' => Mark::Cross,
+        '✘' => Mark::HeavyCross,
+        _ => return None,
+    })
+}
+
 fn is_cell_graphic(c: char) -> bool {
-    box_weights(c).is_some() || block_rects(c).is_some()
+    box_weights(c).is_some() || block_rects(c).is_some() || braille_dots(c).is_some() || mark(c).is_some()
 }
 
 /// Zeichnet ein Rahmen- oder Blockzeichen exakt in seine Zelle.
 fn paint_cell_graphic(painter: &egui::Painter, cell: Rect, c: char, color: Color32) {
+    if let Some(bits) = braille_dots(c) {
+        // Bit 0..2 und 6: linke Spalte von oben, Bit 3..5 und 7: rechte Spalte.
+        const DOTS: [(f32, f32); 8] = [
+            (0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (1.0, 0.0),
+            (1.0, 1.0), (1.0, 2.0), (0.0, 3.0), (1.0, 3.0),
+        ];
+        let step_x = cell.width() / 2.0;
+        let step_y = cell.height() / 4.0;
+        let radius = (step_x.min(step_y) * 0.36).max(0.8);
+        for (i, (col, row)) in DOTS.iter().enumerate() {
+            if bits & (1 << i) != 0 {
+                let center = Pos2::new(cell.left() + step_x * (col + 0.5), cell.top() + step_y * (row + 0.5));
+                painter.circle_filled(center, radius, color);
+            }
+        }
+        return;
+    }
+    if let Some(m) = mark(c) {
+        let heavy = matches!(m, Mark::HeavyCheck | Mark::HeavyCross);
+        let w = cell.width().min(cell.height());
+        let stroke = Stroke::new(if heavy { (w * 0.2).max(1.6) } else { (w * 0.12).max(1.0) }, color);
+        let at = |x: f32, y: f32| Pos2::new(cell.center().x + (x - 0.5) * w, cell.center().y + (y - 0.5) * w);
+        match m {
+            Mark::Check | Mark::HeavyCheck => {
+                painter.line_segment([at(0.14, 0.52), at(0.4, 0.78)], stroke);
+                painter.line_segment([at(0.4, 0.78), at(0.88, 0.2)], stroke);
+            }
+            Mark::Cross | Mark::HeavyCross => {
+                painter.line_segment([at(0.2, 0.2), at(0.8, 0.8)], stroke);
+                painter.line_segment([at(0.8, 0.2), at(0.2, 0.8)], stroke);
+            }
+        }
+        return;
+    }
     if let Some((rects, alpha)) = block_rects(c) {
         let color = color.gamma_multiply(alpha);
         for [x0, y0, x1, y1] in rects {
@@ -1228,6 +1289,18 @@ mod tests {
         }
         assert_eq!(box_weights('a'), None);
         assert_eq!(box_weights('\u{2571}'), None, "Diagonalen zeichnet die Schrift");
+    }
+
+    #[test]
+    fn braille_and_marks_are_drawn_natively() {
+        // Die Spinner von docker compose, dazu Erfolg und Fehler.
+        for c in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠿✔✘✓✗".chars() {
+            assert!(is_cell_graphic(c), "{c}");
+        }
+        assert_eq!(braille_dots('⠋'), Some(0b0000_1011));
+        assert_eq!(braille_dots('⣿'), Some(0xff));
+        assert_eq!(braille_dots('a'), None);
+        assert_eq!(mark('✘'), Some(Mark::HeavyCross));
     }
 
     #[test]

@@ -8,6 +8,28 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub db_path: Option<PathBuf>,
     pub close_to_tray: bool,
+    pub window: WindowState,
+    pub sidebar_width: Option<f32>,
+    pub sidebar_collapsed: bool,
+}
+
+/// Fenstergröße in logischen Pixeln. Die Position kennt nur X11; unter Wayland bestimmt sie der
+/// Fenstermanager, und `x`/`y` bleiben leer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowState {
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub maximized: bool,
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(value.to_lowercase().as_str(), "true" | "yes" | "on" | "1")
+}
+
+fn parse_num(value: &str) -> Option<f32> {
+    value.parse::<f32>().ok().filter(|v| v.is_finite())
 }
 
 /// Woher der Datenbankpfad stammt.
@@ -86,9 +108,14 @@ impl Config {
             let value = value.trim().trim_matches('"');
             match (section.as_str(), key.trim().to_lowercase().as_str()) {
                 ("database", "path") if !value.is_empty() => config.db_path = Some(expand(value)),
-                ("window", "close_to_tray") => {
-                    config.close_to_tray = matches!(value.to_lowercase().as_str(), "true" | "yes" | "on" | "1");
-                }
+                ("window", "close_to_tray") => config.close_to_tray = parse_bool(value),
+                ("window", "width") => config.window.width = parse_num(value),
+                ("window", "height") => config.window.height = parse_num(value),
+                ("window", "x") => config.window.x = parse_num(value),
+                ("window", "y") => config.window.y = parse_num(value),
+                ("window", "maximized") => config.window.maximized = parse_bool(value),
+                ("sidebar", "width") => config.sidebar_width = parse_num(value),
+                ("sidebar", "collapsed") => config.sidebar_collapsed = parse_bool(value),
                 _ => {}
             }
         }
@@ -106,15 +133,29 @@ impl Config {
 
     fn render(&self) -> String {
         let db = self.db_path.as_ref().map_or(String::new(), |p| p.display().to_string());
+        let num = |v: Option<f32>| v.map_or(String::new(), |v| format!("{}", v.round()));
+        let w = &self.window;
         format!(
-            "; Einstellungen von SSHelf. Kann von Hand bearbeitet werden.\n\n\
+            "; Einstellungen von SSHelf. Kann von Hand bearbeitet werden,\n\
+             ; eigene Kommentare gehen beim nächsten Speichern durch die App aber verloren.\n\n\
              [database]\n\
              ; Pfad zur Datenbank. Leer: sshelf.db neben dem Programm, sonst der Standardort.\n\
              path = {db}\n\n\
              [window]\n\
              ; true: Das Schließen des Fensters minimiert in die Statusleiste.\n\
-             close_to_tray = {}\n",
-            self.close_to_tray
+             close_to_tray = {}\n\
+             ; Zuletzt verwendete Größe. Die Position (x, y) lässt sich nur unter X11 setzen.\n\
+             width = {}\nheight = {}\nx = {}\ny = {}\nmaximized = {}\n\n\
+             [sidebar]\n\
+             width = {}\ncollapsed = {}\n",
+            self.close_to_tray,
+            num(w.width),
+            num(w.height),
+            num(w.x),
+            num(w.y),
+            w.maximized,
+            num(self.sidebar_width),
+            self.sidebar_collapsed,
         )
     }
 
@@ -142,6 +183,10 @@ mod tests {
         assert!(c.close_to_tray);
         assert_eq!(Config::parse(""), Config::default());
         assert_eq!(Config::parse("path=/falsche/sektion"), Config::default());
+        let w = Config::parse("[window]\nwidth = 1300\nheight = abc\nx =\nmaximized = 1\n[sidebar]\nwidth=280\ncollapsed=true");
+        assert_eq!(w.window, WindowState { width: Some(1300.0), maximized: true, ..Default::default() });
+        assert_eq!(w.sidebar_width, Some(280.0));
+        assert!(w.sidebar_collapsed);
     }
 
     #[test]
@@ -151,7 +196,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sshelf-cfg-{b:02x?}").replace([' ', ',', '[', ']'], ""));
         let file = dir.join("unter/config.ini");
         assert_eq!(Config::load(&file).unwrap(), Config::default(), "fehlende Datei ist kein Fehler");
-        let c = Config { db_path: Some("/a b/c.db".into()), close_to_tray: true };
+        let c = Config {
+            db_path: Some("/a b/c.db".into()),
+            close_to_tray: true,
+            window: WindowState { width: Some(1200.0), height: Some(800.0), x: Some(-20.0), y: Some(40.0), maximized: true },
+            sidebar_width: Some(310.0),
+            sidebar_collapsed: true,
+        };
         c.save(&file).unwrap();
         assert_eq!(Config::load(&file).unwrap(), c);
         let empty = Config::default();
@@ -162,7 +213,7 @@ mod tests {
 
     #[test]
     fn resolve_priorities() {
-        let cfg = Config { db_path: Some("/c.db".into()), close_to_tray: false };
+        let cfg = Config { db_path: Some("/c.db".into()), ..Default::default() };
         assert_eq!(resolve(Some("/x.db".into()), &cfg).unwrap(), ("/x.db".into(), Source::Cli));
         assert_eq!(resolve(None, &cfg).unwrap(), ("/c.db".into(), Source::Config));
         assert_eq!(resolve(None, &Config::default()).unwrap().1, Source::Default);

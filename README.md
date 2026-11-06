@@ -6,7 +6,10 @@ installiertes `ssh`.
 
 ## Funktionen
 
-- Verbindungen anlegen, bearbeiten, duplizieren, löschen, suchen und in Gruppen ordnen
+- Verbindungen anlegen, bearbeiten, duplizieren, löschen, suchen und in Gruppen ordnen;
+  Gruppen lassen sich zuklappen, vorhandene Gruppen im Editor auswählen
+- Seitenleiste in der Breite verstellbar und auf eine Symbolleiste einklappbar
+- Fenstergröße, Maximierung und Seitenleiste werden für den nächsten Start gespeichert
 - Felder: Name, Gruppe, Host, Port, Benutzer, Anmeldung, Schlüssel, Jump-Host, Keepalive,
   Startbefehl, Notizen
 - Anmeldung per gespeichertem Schlüssel, Passwort, SSH-Agent oder Rückfrage (auch Einmalcodes)
@@ -35,10 +38,38 @@ Der Datenbankpfad und die Statusleiste lassen sich in den Einstellungen ändern 
 
     [window]
     close_to_tray = true
+    width = 1180
+    height = 760
+    maximized = false
+
+    [sidebar]
+    width = 272
+    collapsed = false
+
+Größe, Maximierung und Seitenleiste schreibt die App beim Schließen selbst. Eine Fensterposition
+(`x`, `y`) wird nur unter X11 gespeichert und gesetzt; unter Wayland legt der Fenstermanager sie
+fest.
 
 Reihenfolge für die Datenbank: `--db`, dann `path` aus der Datei, dann `sshelf.db` neben dem
 Programm, dann der Standardort. Fehlt eine konfigurierte Datei beim Start (zum Beispiel weil ein
 Laufwerk nicht eingehängt ist), zeigt die App eine Auswahl, statt still eine leere anzulegen.
+
+## Programmsymbol und Anwendungsmenü
+
+Unter Einstellungen → „Ins Anwendungsmenü eintragen“ (oder `sshelf --install-desktop`) legt
+SSHelf `~/.local/share/applications/sshelf.desktop` und das Symbol
+`~/.local/share/icons/hicolor/scalable/apps/sshelf.svg` an. Danach erscheint SSHelf mit Symbol
+im Startmenü, in der Fensterleiste und in der Titelzeile. `--uninstall-desktop` entfernt beides.
+
+Eine ausführbare Datei kann unter Linux kein eigenes Symbol tragen; Dateimanager zeigen dafür
+immer das Symbol des Dateityps. „Starter neben dem Programm ablegen“ legt deshalb zusätzlich
+`SSHelf.desktop` in den Programmordner, das im Dateimanager mit Symbol erscheint.
+
+## Titelleiste
+
+Titelleiste und Fensterknöpfe zeichnet der Fenstermanager (KDE, X11-Fenstermanager), dadurch
+folgen sie dessen Thema, und ein Doppelklick maximiert bzw. stellt wieder her. Auf Wayland-Desktops
+ohne diese Möglichkeit, etwa GNOME, zeichnet SSHelf eine eigene Titelleiste im Adwaita-Stil.
 
 ## Statusleiste
 
@@ -80,7 +111,8 @@ Die nötige glibc-Version hängt vom Build ab:
 | `cargo build --release` auf diesem System | glibc 2.35 | Ubuntu 22.04+, Debian 12+, aktuelle Rolling Releases |
 | `./build-portable.sh` (optional, braucht zig und cargo-zigbuild, bisher ungetestet) | glibc 2.28 | zusätzlich ältere Distributionen |
 
-CJK-Zeichen und manche Symbole (etwa ✓) kommen aus Systemschriften, falls vorhanden; sonst
+Rahmen-, Block- und Braille-Zeichen (Spinner von `docker compose` oder `btop`) sowie ✓✔✗✘
+zeichnet SSHelf selbst. CJK-Zeichen und manche weitere Symbole kommen aus Systemschriften, falls vorhanden; sonst
 erscheint ein Kästchen. Ein Bedienungsproblem entsteht dadurch nicht.
 
 ## Entwicklung
@@ -95,6 +127,7 @@ Mit `SSHELF_SHOTS=<ordner>` speichern die Oberflächentests Screenshots.
 | `src/store.rs` | SQLite-Datenbank |
 | `src/config.rs` | INI-Konfiguration, Datenbankpfad |
 | `src/tray.rs` | Symbol in der Statusleiste |
+| `src/desktop.rs` | Programmsymbol, Eintrag im Anwendungsmenü |
 | `src/keys.rs` | Schlüssel prüfen und erzeugen |
 | `src/ssh.rs` | Verbindungsaufbau, Anmeldung, Jump-Hosts |
 | `src/term.rs` | Terminal: Eingabe und Darstellung |
