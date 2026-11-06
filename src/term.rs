@@ -653,6 +653,13 @@ struct Run {
     italic: bool,
 }
 
+/// Schriftgröße und -familie des Terminals (leere Familie: eingebautes Hack).
+#[derive(Clone, Copy)]
+pub struct TermFont<'a> {
+    pub size: f32,
+    pub family: &'a str,
+}
+
 /// Zeichnet das Terminal und verarbeitet die Eingaben. Gibt `true` zurück, wenn es den Fokus hat.
 pub fn show(
     ui: &mut egui::Ui,
@@ -660,9 +667,10 @@ pub fn show(
     cmds: &mpsc::UnboundedSender<Cmd>,
     view: &mut ViewState,
     palette: &TermPalette,
-    font_size: f32,
+    font: TermFont<'_>,
     take_focus: bool,
 ) {
+    let TermFont { size: font_size, family: font_family } = font;
     let font = FontId::monospace(font_size);
     // Echter Fettschnitt, wenn `fonts::install` ihn gefunden hat; sonst Doppeldruck.
     let bold_font = FontId::new(font_size, egui::FontFamily::Name(crate::fonts::BOLD_FAMILY.into()));
@@ -670,7 +678,7 @@ pub fn show(
     let ppp = ui.ctx().pixels_per_point();
     let (advance, row_height) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     // Zeichen mit FreeType rastern, wenn vorhanden (schärfer, wie Konsole); sonst egui.
-    let freetype = crate::glyphs::cache(ui.ctx(), (font_size * ppp).round().max(4.0) as u32, crate::fonts::hack_bold_bytes);
+    let freetype = crate::glyphs::cache(ui.ctx(), (font_size * ppp).round().max(4.0) as u32, font_family);
     let (cell_w, cell_h) = match &freetype {
         Some(ft) => {
             let m = ft.lock().metrics;

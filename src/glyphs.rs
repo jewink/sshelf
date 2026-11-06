@@ -201,6 +201,24 @@ pub struct FreeType {
 // gleichzeitig benutzt.
 unsafe impl Send for FreeType {}
 
+/// Schriftdateien für die Terminalschrift: Normal- und optional Fettschnitt, jeweils Daten und
+/// Index innerhalb von Sammeldateien (.ttc).
+#[derive(Clone)]
+pub struct FontSource {
+    pub regular: (Arc<[u8]>, u32),
+    pub bold: Option<(Arc<[u8]>, u32)>,
+}
+
+impl FontSource {
+    /// Das eingebaute Hack, mit dem installierten Hack Bold, falls vorhanden.
+    pub fn builtin() -> FontSource {
+        FontSource {
+            regular: (Arc::from(epaint_default_fonts::HACK_REGULAR), 0),
+            bold: crate::fonts::hack_bold_bytes().map(|b| (b, 0)),
+        }
+    }
+}
+
 /// Zellmaße der Terminalschrift in Bildschirmpixeln.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
@@ -210,8 +228,8 @@ pub struct Metrics {
 }
 
 impl FreeType {
-    /// Lädt FreeType mit der eingebauten Hack-Schrift; `bold` ist ein optionaler Fettschnitt.
-    pub fn new(bold: Option<Arc<[u8]>>) -> Option<FreeType> {
+    /// Lädt FreeType mit der gewählten Schrift (Daten und Index in Sammeldateien).
+    pub fn new(source: &FontSource) -> Option<FreeType> {
         let api = Api::load()?;
         let mut library = std::ptr::null_mut();
         // SAFETY: Signatur entspricht FT_Init_FreeType.
@@ -220,14 +238,20 @@ impl FreeType {
         if unsafe { init(&mut library) } != 0 {
             return None;
         }
-        let open = |data: Arc<[u8]>| -> Option<Face> {
+        let open = |(data, index): &(Arc<[u8]>, u32)| -> Option<Face> {
             let mut ptr = std::ptr::null_mut();
             // SAFETY: `data` lebt im zurückgegebenen Face weiter.
-            let err = unsafe { (api.new_memory_face)(library, data.as_ptr(), data.len() as c_long, 0, &mut ptr) };
-            (err == 0 && !ptr.is_null()).then_some(Face { ptr, _data: data })
+            let err = unsafe {
+                (api.new_memory_face)(library, data.as_ptr(), data.len() as c_long, *index as c_long, &mut ptr)
+            };
+            (err == 0 && !ptr.is_null()).then(|| Face { ptr, _data: data.clone() })
         };
-        let regular = open(Arc::from(epaint_default_fonts::HACK_REGULAR))?;
-        let bold = bold.and_then(open);
+        let Some(regular) = open(&source.regular) else {
+            // SAFETY: Bibliothek wurde oben angelegt und hat noch keine Faces.
+            unsafe { (api.done_library)(library) };
+            return None;
+        };
+        let bold = source.bold.as_ref().and_then(open);
         Some(FreeType { api, library, regular, bold })
     }
 
@@ -333,6 +357,7 @@ pub struct Glyph {
 pub struct GlyphCache {
     ft: FreeType,
     px: u32,
+    family: String,
     pub metrics: Metrics,
     atlas: TextureHandle,
     cursor: (usize, usize, usize),
@@ -340,10 +365,10 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
-    fn new(ctx: &egui::Context, ft: FreeType, px: u32) -> Option<GlyphCache> {
+    fn new(ctx: &egui::Context, ft: FreeType, px: u32, family: &str) -> Option<GlyphCache> {
         let metrics = ft.metrics(px)?;
         let atlas = ctx.load_texture("terminal-glyphs", ColorImage::new([ATLAS, ATLAS], vec![Color32::TRANSPARENT; ATLAS * ATLAS]), TextureOptions::NEAREST);
-        Some(GlyphCache { ft, px, metrics, atlas, cursor: (1, 1, 0), glyphs: HashMap::new() })
+        Some(GlyphCache { ft, px, family: family.to_owned(), metrics, atlas, cursor: (1, 1, 0), glyphs: HashMap::new() })
     }
 
     pub fn texture_id(&self) -> egui::TextureId {
@@ -395,23 +420,32 @@ impl GlyphCache {
     }
 }
 
-/// Pro Fenster und Pixelgröße ein Cache. `None`, wenn FreeType nicht verfügbar ist.
-pub fn cache(ctx: &egui::Context, px: u32, bold_font: impl FnOnce() -> Option<Arc<[u8]>>) -> Option<Arc<Mutex<GlyphCache>>> {
+/// Pro Fenster ein Cache für Schrift und Pixelgröße. `None`, wenn FreeType nicht verfügbar ist.
+/// `family` leer heißt: eingebautes Hack. Fehlt die gewählte Schrift, wird Hack verwendet und
+/// [`take_missing_font`] meldet das einmal.
+pub fn cache(ctx: &egui::Context, px: u32, family: &str) -> Option<Arc<Mutex<GlyphCache>>> {
     type Slot = Option<Arc<Mutex<GlyphCache>>>;
     let id = egui::Id::unique("freetype-glyph-cache");
     let failed = egui::Id::unique("freetype-unavailable");
     if ctx.data(|d| d.get_temp::<bool>(failed)).unwrap_or(false) {
         return None;
     }
-    if let Some(Some(c)) = ctx.data(|d| d.get_temp::<Slot>(id))
-        && c.lock().px == px
-    {
-        return Some(c);
+    if let Some(Some(c)) = ctx.data(|d| d.get_temp::<Slot>(id)) {
+        let current = c.lock();
+        if current.px == px && current.family == family {
+            drop(current);
+            return Some(c);
+        }
     }
-    // Neu anlegen (erster Aufruf oder andere Schriftgröße). Der Fettschnitt wird übernommen.
-    let created = FreeType::new(bold_font()).and_then(|ft| GlyphCache::new(ctx, ft, px));
+    let chosen = if family.is_empty() { None } else { crate::fonts::font_source(family) };
+    let missing = !family.is_empty() && chosen.is_none();
+    let attempt = |source: &FontSource| FreeType::new(source).and_then(|ft| GlyphCache::new(ctx, ft, px, family));
+    let created = chosen.as_ref().and_then(attempt).or_else(|| attempt(&FontSource::builtin()));
     match created {
         Some(c) => {
+            if missing {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("missing-terminal-font"), Some(family.to_owned())));
+            }
             let c = Arc::new(Mutex::new(c));
             ctx.data_mut(|d| d.insert_temp::<Slot>(id, Some(c.clone())));
             Some(c)
@@ -423,13 +457,18 @@ pub fn cache(ctx: &egui::Context, px: u32, bold_font: impl FnOnce() -> Option<Ar
     }
 }
 
+/// Name einer gewählten, aber nicht gefundenen Schrift (nur einmal).
+pub fn take_missing_font(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Option<String>>(egui::Id::unique("missing-terminal-font")).take())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn freetype_renders_hack_with_whole_pixel_metrics() {
-        let Some(ft) = FreeType::new(None) else {
+        let Some(ft) = FreeType::new(&FontSource::builtin()) else {
             eprintln!("Übersprungen: libfreetype.so.6 nicht vorhanden");
             return;
         };
@@ -454,7 +493,7 @@ mod tests {
     fn glyph_cache_packs_and_reuses() {
         let ctx = egui::Context::default();
         let mut out = ctx.run_ui(Default::default(), |ui| {
-            let Some(cache) = super::cache(ui.ctx(), 12, || None) else {
+            let Some(cache) = super::cache(ui.ctx(), 12, "") else {
                 eprintln!("Übersprungen: libfreetype.so.6 nicht vorhanden");
                 return;
             };
@@ -465,10 +504,15 @@ mod tests {
             assert_eq!(c.glyph('a', false, false).unwrap().uv, a.uv, "zweiter Aufruf aus dem Cache");
             assert!(c.glyph('\u{10fffd}', false, false).is_none());
             drop(c);
-            let same = super::cache(ui.ctx(), 12, || None).unwrap();
+            let same = super::cache(ui.ctx(), 12, "").unwrap();
             assert!(Arc::ptr_eq(&cache, &same));
-            let bigger = super::cache(ui.ctx(), 16, || None).unwrap();
+            let bigger = super::cache(ui.ctx(), 16, "").unwrap();
             assert_eq!(bigger.lock().px, 16);
+            // Unbekannte Schrift: Hack wird verwendet und das einmal gemeldet.
+            let unknown = super::cache(ui.ctx(), 16, "Gibt Es Nicht Mono").unwrap();
+            assert_eq!(unknown.lock().metrics, bigger.lock().metrics);
+            assert_eq!(super::take_missing_font(ui.ctx()).as_deref(), Some("Gibt Es Nicht Mono"));
+            assert_eq!(super::take_missing_font(ui.ctx()), None);
         });
         out.textures_delta.clear();
     }

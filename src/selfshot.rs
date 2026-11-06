@@ -28,7 +28,8 @@ impl eframe::App for Shot {
         let palette = crate::theme::TermPalette::for_mode(true);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.bg)).show(ui, |ui| {
             let size = std::env::var("SSHELF_FONTSIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
-            crate::term::show(ui, &self.shared, &self.cmds, &mut self.view, &palette, size, false);
+            let family = std::env::var("SSHELF_FONT").unwrap_or_default();
+            crate::term::show(ui, &self.shared, &self.cmds, &mut self.view, &palette, crate::term::TermFont { size, family: &family }, false);
         });
         if self.frames == 20 {
             let path = self.path.clone();

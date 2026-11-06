@@ -46,6 +46,10 @@ Der Datenbankpfad und die Statusleiste lassen sich in den Einstellungen ändern 
     width = 272
     collapsed = false
 
+    [terminal]
+    font = JetBrains Mono
+    size = 14
+
 Größe, Maximierung und Seitenleiste schreibt die App beim Schließen selbst. Eine Fensterposition
 (`x`, `y`) wird nur unter X11 gespeichert und gesetzt; unter Wayland legt der Fenstermanager sie
 fest.
@@ -117,11 +121,13 @@ Systemschrift, die es enthält: zuerst über fontconfig, notfalls in allen insta
 Bedarf geladen. fontconfig wird zur Laufzeit nachgeladen und ist keine feste Abhängigkeit; ohne
 passende Systemschrift erscheint ein Kästchen.
 
-Die Terminalschrift ist das eingebaute Hack. Gerastert wird sie wie bei Konsole mit FreeType
+Die Terminalschrift lässt sich in den Einstellungen wählen; angeboten werden alle installierten
+Schriften mit fester Zeichenbreite, mit Vorschau. Standard ist das eingebaute Hack. Fehlt eine
+gewählte Schrift (etwa auf einem anderen Rechner), nimmt SSHelf Hack und weist darauf hin. Gerastert wird sie wie bei Konsole mit FreeType
 (leichtes Hinting), das zur Laufzeit geladen wird; fehlt `libfreetype.so.6`, zeichnet egui die
-Schrift etwas weicher. Zellen sind ganze Bildschirmpixel breit. Ist Hack auf dem System
-installiert (unter KDE Standard), nutzt SSHelf dessen echten Fettschnitt, sonst einen von FreeType
-erzeugten. Zeichen, die Hack nicht hat, kommen über den Schriftrückfall aus Systemschriften.
+Schrift etwas weicher. Zellen sind ganze Bildschirmpixel breit. Fett kommt aus dem Fettschnitt der
+Familie (für das eingebaute Hack aus einem installierten Hack Bold), sonst erzeugt FreeType ihn.
+Zeichen, die der Schrift fehlen, kommen über den Schriftrückfall aus Systemschriften.
 
 Rahmen-, Block- und Braille-Zeichen (Spinner von `docker compose` oder `btop`), ✓✔✗✘ und die
 Powerline-Trenner von Shell-Prompts zeichnet SSHelf selbst, damit sie lückenlos und unabhängig von

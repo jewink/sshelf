@@ -124,6 +124,88 @@ fn find_hack_bold() -> Option<FontInsert> {
     })
 }
 
+/// Hat die Schrift für alle Testzeichen dieselbe Breite? Dann taugt sie fürs Terminal.
+fn is_monospace(data: &[u8], index: u32) -> bool {
+    use skrifa::MetadataProvider as _;
+    let Ok(font) = skrifa::FontRef::from_index(data, index) else { return false };
+    let charmap = font.charmap();
+    let metrics = font.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    let mut width = None;
+    for c in ['i', 'M', 'W', '.', '0', 'm'] {
+        let Some(gid) = charmap.map(c) else { return false };
+        let Some(w) = metrics.advance_width(gid) else { return false };
+        match width {
+            None if w > 0.0 => width = Some(w),
+            Some(first) if (w - first).abs() < 0.5 => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Sucht alle installierten Schriftfamilien mit fester Zeichenbreite, alphabetisch.
+pub fn scan_monospace() -> Vec<String> {
+    let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
+    let mut cache = SourceCache::new(SourceCacheOptions::default());
+    let names: Vec<String> = collection.family_names().map(str::to_owned).collect();
+    let mut found: Vec<String> = names
+        .into_iter()
+        // Nerd-Font-Varianten „Propo“ sind für proportionale Darstellung gedacht.
+        .filter(|name| !name.ends_with("Propo"))
+        .filter(|name| {
+            let Some(family) = collection.family_by_name(name) else { return false };
+            let Some(font) = family.default_font() else { return false };
+            font.load(Some(&mut cache)).is_some_and(|blob| is_monospace(blob.as_ref(), font.index()))
+        })
+        .collect();
+    found.sort_by_key(|n| n.to_lowercase());
+    found.dedup();
+    found
+}
+
+/// Liste der Terminalschriften. Die Suche läuft beim ersten Aufruf im Hintergrund; bis dahin `None`.
+pub fn monospace_families(ctx: &eframe::egui::Context) -> Option<Vec<String>> {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Some(list) = LIST.get() {
+        return Some(list.clone());
+    }
+    if !STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = LIST.set(scan_monospace());
+            ctx.request_repaint();
+        });
+    }
+    None
+}
+
+/// Lädt Normal- und Fettschnitt einer installierten Familie. `None`, wenn es sie nicht gibt.
+pub fn font_source(family_name: &str) -> Option<crate::glyphs::FontSource> {
+    let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
+    let mut cache = SourceCache::new(SourceCacheOptions::default());
+    let family = collection.family_by_name(family_name)?;
+    let upright: Vec<_> = family.fonts().iter().filter(|f| f.style() == fontique::FontStyle::Normal).collect();
+    let pick = |target: f32| {
+        upright
+            .iter()
+            .min_by_key(|f| (f.weight().value() - target).abs() as i32)
+            .copied()
+    };
+    let regular = pick(400.0).or_else(|| family.default_font())?;
+    let load = |f: &fontique::FontInfo, cache: &mut SourceCache| -> Option<(std::sync::Arc<[u8]>, u32)> {
+        let blob = f.load(Some(cache))?;
+        Some((std::sync::Arc::from(blob.as_ref()), f.index()))
+    };
+    let regular_data = load(regular, &mut cache)?;
+    // Fettschnitt nur, wenn es wirklich ein eigener ist; sonst erzeugt FreeType ihn.
+    let bold = pick(700.0)
+        .filter(|b| b.weight().value() >= 600.0)
+        .filter(|b| !(b.source().id() == regular.source().id() && b.index() == regular.index()))
+        .and_then(|b| load(b, &mut cache));
+    Some(crate::glyphs::FontSource { regular: regular_data, bold })
+}
+
 /// Die Datei des Hack-Fettschnitts für FreeType (siehe `glyphs`). Wird nur einmal gesucht.
 pub fn hack_bold_bytes() -> Option<std::sync::Arc<[u8]>> {
     static BOLD: std::sync::OnceLock<Option<std::sync::Arc<[u8]>>> = std::sync::OnceLock::new();
@@ -212,6 +294,37 @@ mod tests {
         }
         let bold = find_hack_bold().expect("Hack Bold");
         assert!(bold.name.contains("Bold"));
+    }
+
+    #[test]
+    fn finds_monospace_fonts_and_skips_proportional_ones() {
+        let list = scan_monospace();
+        let installed = |family: &str| {
+            std::process::Command::new("fc-list")
+                .args([family, "family"])
+                .output()
+                .is_ok_and(|o| !o.stdout.is_empty())
+        };
+        for mono in ["Hack", "JetBrains Mono", "Noto Sans Mono", "DejaVu Sans Mono"] {
+            if installed(mono) {
+                assert!(list.iter().any(|f| f == mono), "{mono} fehlt in {list:?}");
+            }
+        }
+        assert!(!list.iter().any(|f| f.ends_with("Propo")), "{list:?}");
+        for proportional in ["Noto Sans", "DejaVu Sans", "Ubuntu"] {
+            assert!(!list.iter().any(|f| f == proportional), "{proportional} ist nicht monospace");
+        }
+    }
+
+    #[test]
+    fn loads_regular_and_bold_of_a_family() {
+        if !std::process::Command::new("fc-list").args(["JetBrains Mono:style=Bold", "family"]).output().is_ok_and(|o| !o.stdout.is_empty()) {
+            eprintln!("Übersprungen, JetBrains Mono Bold nicht installiert");
+            return;
+        }
+        let source = font_source("JetBrains Mono").expect("Familie");
+        assert!(source.bold.is_some(), "eigener Fettschnitt erwartet");
+        assert!(font_source("Gibt Es Nicht Mono").is_none());
     }
 
     #[test]

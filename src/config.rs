@@ -11,6 +11,9 @@ pub struct Config {
     pub window: WindowState,
     pub sidebar_width: Option<f32>,
     pub sidebar_collapsed: bool,
+    /// Schriftfamilie im Terminal; leer heißt eingebautes Hack.
+    pub terminal_font: String,
+    pub terminal_size: Option<f32>,
 }
 
 /// Fenstergröße in logischen Pixeln. Die Position kennt nur X11; unter Wayland bestimmt sie der
@@ -116,6 +119,8 @@ impl Config {
                 ("window", "maximized") => config.window.maximized = parse_bool(value),
                 ("sidebar", "width") => config.sidebar_width = parse_num(value),
                 ("sidebar", "collapsed") => config.sidebar_collapsed = parse_bool(value),
+                ("terminal", "font") => config.terminal_font = value.to_owned(),
+                ("terminal", "size") => config.terminal_size = parse_num(value),
                 _ => {}
             }
         }
@@ -147,7 +152,10 @@ impl Config {
              ; Zuletzt verwendete Größe. Die Position (x, y) lässt sich nur unter X11 setzen.\n\
              width = {}\nheight = {}\nx = {}\ny = {}\nmaximized = {}\n\n\
              [sidebar]\n\
-             width = {}\ncollapsed = {}\n",
+             width = {}\ncollapsed = {}\n\n\
+             [terminal]\n\
+             ; Schriftfamilie, z. B. JetBrains Mono. Leer: eingebautes Hack.\n\
+             font = {}\nsize = {}\n",
             self.close_to_tray,
             num(w.width),
             num(w.height),
@@ -156,6 +164,8 @@ impl Config {
             w.maximized,
             num(self.sidebar_width),
             self.sidebar_collapsed,
+            self.terminal_font,
+            num(self.terminal_size),
         )
     }
 
@@ -202,6 +212,8 @@ mod tests {
             window: WindowState { width: Some(1200.0), height: Some(800.0), x: Some(-20.0), y: Some(40.0), maximized: true },
             sidebar_width: Some(310.0),
             sidebar_collapsed: true,
+            terminal_font: "JetBrains Mono".into(),
+            terminal_size: Some(15.0),
         };
         c.save(&file).unwrap();
         assert_eq!(Config::load(&file).unwrap(), c);

@@ -1221,6 +1221,49 @@ fn desktop_entry_can_be_installed_from_settings() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn terminal_font_can_be_chosen_and_is_remembered() {
+    let dir = temp_dir("font");
+    let db = dir.join("sshelf.db");
+    // Altbestand: Die Größe stand früher in der Datenbank und wird übernommen.
+    Store::open(&db).unwrap().set_setting("font_size", "12").unwrap();
+    let mut h = gui(&db, true);
+    setup_with_connection(&mut h, "Eins");
+    assert_eq!(app(&h).test_font_size(), 12.0);
+
+    click(&mut h, "Einstellungen");
+    h.get_all_by_role(Role::ComboBox).next().unwrap().click();
+    settle(&mut h);
+    pump(&mut h, "Schriftsuche", |h| h.query_by_label("Schriften werden gesucht…").is_none());
+    settle(&mut h);
+    let wanted = ["JetBrains Mono", "Noto Sans Mono", "DejaVu Sans Mono"]
+        .into_iter()
+        .find(|f| h.query_by_label(f).is_some());
+    let Some(wanted) = wanted else {
+        eprintln!("Übersprungen: keine bekannte Monospace-Schrift installiert");
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    assert!(h.query_by_label("Noto Sans").is_none(), "proportionale Schriften stehen nicht in der Liste");
+    shot(&mut h, "29-schriftauswahl");
+    h.get_by_label(wanted).click();
+    settle(&mut h);
+    shot(&mut h, "29b-vorschau");
+    let config = Config::load(&dir.join("config.ini")).unwrap();
+    assert_eq!(config.terminal_font, wanted);
+    drop(h);
+
+    let mut h = gui(&db, true);
+    settle(&mut h);
+    fill(&mut h, 0, "master-passwort");
+    click(&mut h, "Entsperren");
+    assert_eq!(app(&h).test_config().terminal_font, wanted, "Schrift beim Neustart geladen");
+    assert_eq!(app(&h).test_font_size(), 12.0);
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Das Fenster geht zu und wieder auf: Tresor und SSH-Sitzung laufen ohne Fenster weiter.
 #[test]
 fn sessions_survive_while_the_window_is_closed() {

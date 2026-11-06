@@ -23,6 +23,9 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 const MIN_PASSWORD: usize = 8;
+const PREVIEW: &str = "\x1b[1;32mjens@server\x1b[0m:\x1b[1;34m~/docker\x1b[0m$ ls -l\r\n\
+drwxr-xr-x 2 jens jens 4096 \x1b[1;34matuin\x1b[0m  \x1b[32m\u{2714}\x1b[0m Pulled  0O 1lI {}[]=>\r\n\
+Umlaute: \u{e4}\u{f6}\u{fc}\u{df}  \x1b[3mkursiv\x1b[0m  \x1b[1mfett\x1b[0m  \u{2500}\u{252c}\u{2500} \u{280b}\u{2819}\u{2839}\r\n";
 const SIDEBAR_MIN: f32 = 220.0;
 const SIDEBAR_MAX: f32 = 560.0;
 
@@ -176,6 +179,8 @@ pub struct App {
     /// Zuletzt gespeicherter Fensterzustand, um unnötiges Schreiben zu vermeiden.
     saved_config: Config,
     collapsed_groups: BTreeSet<String>,
+    /// Kleines Terminal mit Beispieltext für die Schriftauswahl.
+    preview: Option<(Arc<Shared>, mpsc::UnboundedSender<Cmd>, ViewState)>,
     desktop: Option<desktop::Locations>,
     /// Abgelegter Starter neben dem Programm (Hinweis in den Einstellungen).
     launcher: Option<PathBuf>,
@@ -369,7 +374,8 @@ impl App {
     pub fn new(start: StartDb, config_path: PathBuf, config: Config, db_source: Source) -> Result<App> {
         let store = start.store;
         let theme_choice = store.get_setting("theme").map_or(ThemeChoice::Dark, |s| ThemeChoice::parse(&s));
-        let font_size = stored_font_size(&store);
+        // Früher stand die Größe in der Datenbank; einmalig übernehmen.
+        let font_size = config.terminal_size.unwrap_or_else(|| stored_font_size(&store)).clamp(9.0, 28.0);
         let vault_exists = store.load_vault()?.is_some();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -417,6 +423,7 @@ impl App {
             hide_on_close: false,
             saved_config: Config::default(),
             collapsed_groups: BTreeSet::new(),
+            preview: None,
             desktop: desktop::Locations::user().ok(),
             launcher: None,
         };
@@ -435,6 +442,8 @@ impl App {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         self.apply_theme();
         self.hide_on_close = false;
+        // Die Vorschau hängt am alten Fenster-Kontext.
+        self.preview = None;
         self.tray_state.set_ctx(Some(ctx.clone()));
         for s in &self.sessions {
             s.shared.set_repaint(Some(ctx.clone()));
@@ -549,7 +558,6 @@ impl App {
     fn use_store(&mut self, new: Store) -> Result<()> {
         self.vault_exists = new.load_vault()?.is_some();
         self.theme = new.get_setting("theme").map_or(ThemeChoice::Dark, |s| ThemeChoice::parse(&s));
-        self.font_size = stored_font_size(&new);
         self.db_form = new.path().display().to_string();
         *self.store.lock() = new;
         self.db_source = Source::Config;
@@ -1458,7 +1466,7 @@ impl App {
                 let shared = session.shared.clone();
                 shared.set_dark(dark);
                 let cmds = session.cmds.clone();
-                term::show(ui, &shared, &cmds, &mut session.view, &palette, self.font_size, take_focus);
+                term::show(ui, &shared, &cmds, &mut session.view, &palette, term::TermFont { size: self.font_size, family: &self.config.terminal_font }, take_focus);
             }
         }
         if reconnect {
@@ -1968,6 +1976,18 @@ impl App {
         let db_form = &mut self.db_form;
         let mut theme_choice = self.theme;
         let mut font_size = self.font_size;
+        let fonts_found = crate::fonts::monospace_families(ui.ctx());
+        let current_font = self.config.terminal_font.clone();
+        let mut new_font_family: Option<String> = None;
+        if self.preview.is_none() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let shared = Shared::new(tx.clone(), ui.ctx().clone(), ui.visuals().dark_mode);
+            shared.feed(PREVIEW.as_bytes());
+            self.preview = Some((shared, tx, ViewState::default()));
+        }
+        let dark_now = ui.visuals().dark_mode;
+        let preview_font_size = self.font_size;
+        let mut preview = self.preview.take();
         let form = &mut self.password_form;
         Self::page_frame(ui, |ui| {
             ui.heading("Einstellungen");
@@ -1980,8 +2000,53 @@ impl App {
                         theme_changed |= ui.selectable_value(&mut theme_choice, t, t.label()).changed();
                     }
                 });
-                field_label(ui, c, "Schriftgröße im Terminal");
-                font_changed = ui.add(egui::Slider::new(&mut font_size, 9.0..=28.0).step_by(1.0)).changed();
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        field_label(ui, c, "Schrift im Terminal");
+                        let shown = if current_font.is_empty() { "Hack (eingebaut)".to_owned() } else { current_font.clone() };
+                        egui::ComboBox::from_id_salt("terminal_font")
+                            .selected_text(shown)
+                            .width(260.0)
+                            .height(360.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(current_font.is_empty(), "Hack (eingebaut)").clicked() {
+                                    new_font_family = Some(String::new());
+                                }
+                                match &fonts_found {
+                                    None => {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label("Schriften werden gesucht…");
+                                        });
+                                    }
+                                    Some(list) => {
+                                        for f in list {
+                                            if ui.selectable_label(current_font == *f, f).clicked() {
+                                                new_font_family = Some(f.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                    });
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        field_label(ui, c, "Schriftgröße im Terminal");
+                        font_changed = ui.add(egui::Slider::new(&mut font_size, 9.0..=28.0).step_by(1.0)).changed();
+                    });
+                });
+                field_label(ui, c, "Vorschau");
+                if let Some((shared, tx, view)) = preview.as_mut() {
+                    shared.set_dark(dark_now);
+                    let palette = TermPalette::for_mode(dark_now);
+                    let family = new_font_family.clone().unwrap_or_else(|| current_font.clone());
+                    // Festes Rechteck: In der scrollbaren Seite hätte das Terminal sonst keine Höhe.
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover());
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        ui.set_clip_rect(rect);
+                        term::show(ui, shared, tx, view, &palette, term::TermFont { size: preview_font_size, family: &family }, false);
+                    });
+                }
             });
             ui.add_space(8.0);
             soft_card(c).show(ui, |ui| {
@@ -2059,6 +2124,7 @@ impl App {
                 change_pw = ui.button("Passwort ändern").clicked();
             });
         });
+        self.preview = preview;
         if tray_changed {
             self.set_close_to_tray(close_to_tray);
         }
@@ -2104,7 +2170,12 @@ impl App {
         }
         if font_changed {
             self.font_size = font_size;
-            let _ = self.store.lock().set_setting("font_size", &font_size.to_string());
+            self.config.terminal_size = Some(font_size);
+            self.persist_layout();
+        }
+        if let Some(family) = new_font_family {
+            self.config.terminal_font = family;
+            self.persist_layout();
         }
         if change_pw {
             match self.change_password() {
@@ -2457,6 +2528,9 @@ impl App {
         }
         self.ui_key_dialog(ui, &c);
         self.ui_rename_dialog(ui, &c);
+        if let Some(missing) = crate::glyphs::take_missing_font(ui.ctx()) {
+            self.notify(format!("Die Schrift „{missing}“ ist nicht installiert, es wird Hack verwendet."), true);
+        }
         self.ui_db_dialog(ui, &c);
         self.ui_confirm(ui, &c);
         self.ui_toast(ui, &c);
@@ -2509,6 +2583,9 @@ impl App {
     }
     pub fn test_config(&self) -> &Config {
         &self.config
+    }
+    pub fn test_font_size(&self) -> f32 {
+        self.font_size
     }
     pub fn test_set_desktop(&mut self, loc: desktop::Locations) {
         self.desktop = Some(loc);
