@@ -431,7 +431,7 @@ impl App {
     pub fn attach(&mut self, ctx: &egui::Context) {
         self.ctx = ctx.clone();
         theme::apply_style(ctx);
-        theme::load_symbol_font(ctx);
+        let _ = crate::fonts::install(ctx);
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         self.apply_theme();
         self.hide_on_close = false;

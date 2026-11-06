@@ -11,6 +11,9 @@ chacha20poly1305 = "0.11.0"
 directories = "6.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
+egui_system_font_provider = "0.37"
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
+fontique = { version = "0.11.1", default-features = false, features = ["system", "fontconfig-dlopen"] }
 getrandom = "0.4.3"
 ksni = "0.3.7"
 parking_lot = "0.13.0"
@@ -18,9 +21,16 @@ rand = "0.10"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 zeroize = "1.9.1"
+libloading = "0.8"
+epaint_default_fonts = "0.37"
+
+[features]
+# Nur zur Diagnose der Darstellung im echten Renderer (siehe src/selfshot.rs).
+selfshot = ["dep:image"]
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }

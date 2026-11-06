@@ -3,6 +3,10 @@
 mod app;
 mod config;
 mod desktop;
+mod fonts;
+mod glyphs;
+#[cfg(feature = "selfshot")]
+mod selfshot;
 mod keys;
 mod ssh;
 mod store;
@@ -53,6 +57,10 @@ impl eframe::App for Window<'_> {
 }
 
 fn run() -> Result<()> {
+    #[cfg(feature = "selfshot")]
+    if let Ok(path) = std::env::var("SSHELF_SELFSHOT") {
+        return selfshot::run(path);
+    }
     let mut db = None;
     let mut config_path = None;
     let mut args = std::env::args().skip(1);
@@ -94,7 +102,12 @@ fn run() -> Result<()> {
     // Bleibt das Symbol in der Statusleiste, läuft diese Schleife weiter: Das Fenster wird
     // geschlossen und bei Bedarf neu erzeugt, Sitzungen und Tresor bleiben dabei erhalten.
     loop {
-        let options = eframe::NativeOptions { viewport: app.viewport_builder(&icon), ..Default::default() };
+        let options = eframe::NativeOptions {
+            viewport: app.viewport_builder(&icon),
+            // Den Schriftrückfall meldet die App selbst an (fonts.rs), auch für die Tests.
+            system_font_fallback: false,
+            ..Default::default()
+        };
         eframe::run_native(
             "SSHelf",
             options,

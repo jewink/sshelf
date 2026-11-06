@@ -121,6 +121,9 @@ fn visuals(dark: bool) -> Visuals {
     v.selection.stroke = Stroke::new(1.0, c.accent);
     v.hyperlink_color = c.accent;
     v.slider_trailing_fill = true;
+    // Glyphen an ganzen Pixeln statt an Viertelpixeln: deutlich schärfer, besonders im Terminal.
+    v.text_options.font_hinting = true;
+    v.text_options.subpixel_binning = false;
     v.error_fg_color = c.danger;
     v.warn_fg_color = c.warning;
     let radius = CornerRadius::same(7);
@@ -148,7 +151,32 @@ fn visuals(dark: bool) -> Visuals {
     v
 }
 
+/// Terminalschrift scharf am Pixelraster ausrichten (wie FreeType in anderen Terminals).
+/// egui lässt standardmäßig das horizontale Ausrichten weg, das macht senkrechte Striche weich.
+pub fn sharp_tweak() -> egui::FontTweak {
+    use egui::epaint::text::{HintingTarget, SmoothHinting};
+    // Im echten Renderer verglichen: deutlich schärfer als egui-Standard, „Mono“ bringt nichts mehr.
+    egui::FontTweak {
+        hinting: Some(true),
+        hinting_target: HintingTarget::Smooth(SmoothHinting {
+            light: false,
+            symmetric_rendering: false,
+            preserve_linear_metrics: false,
+        }),
+        ..Default::default()
+    }
+}
+
+fn sharpen_monospace(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(hack) = fonts.font_data.get_mut("Hack") {
+        std::sync::Arc::make_mut(hack).tweak = sharp_tweak();
+    }
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply_style(ctx: &egui::Context) {
+    sharpen_monospace(ctx);
     ctx.set_visuals_of(egui::Theme::Dark, visuals(true));
     ctx.set_visuals_of(egui::Theme::Light, visuals(false));
     ctx.all_styles_mut(|s| {
@@ -163,60 +191,6 @@ pub fn apply_style(ctx: &egui::Context) {
         s.text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
         s.interaction.selectable_labels = false;
     });
-}
-
-/// Systemschrift als Rückfall hinzufügen. Fehlt sie, erscheint für das Zeichen nur ein Kästchen;
-/// das Programm selbst kommt ohne installierte Schriften aus.
-fn add_fallback_font(ctx: &egui::Context, name: &str, candidates: &[&str]) {
-    let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else { return };
-    let data = egui::FontData::from_owned(bytes);
-    let families = [egui::FontFamily::Monospace, egui::FontFamily::Proportional]
-        .map(|family| egui::epaint::text::InsertFontFamily {
-            family,
-            priority: egui::epaint::text::FontPriority::Lowest,
-        })
-        .to_vec();
-    ctx.add_font(egui::epaint::text::FontInsert::new(name, data, families));
-}
-
-/// Für Symbole wie ✓, die den eingebauten Schriften fehlen. Klein, darum gleich beim Start.
-pub fn load_symbol_font(ctx: &egui::Context) {
-    add_fallback_font(
-        ctx,
-        "system-symbols",
-        &[
-            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
-            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-            "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-        ],
-    );
-}
-
-/// CJK-Schriften sind viele Megabyte groß und werden erst geladen, wenn sie gebraucht werden.
-pub fn load_cjk_font(ctx: &egui::Context) {
-    // Merkt sich pro Fenster-Kontext, ob es schon versucht wurde.
-    let tried = egui::Id::unique("cjk-font-tried");
-    if ctx.data_mut(|d| *d.get_temp_mut_or_default::<bool>(tried)) {
-        return;
-    }
-    ctx.data_mut(|d| d.insert_temp(tried, true));
-    add_fallback_font(
-        ctx,
-        "system-cjk",
-        &[
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        ],
-    );
 }
 
 /// Farbschema des Terminals.

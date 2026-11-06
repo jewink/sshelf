@@ -413,7 +413,6 @@ impl server::Handler for TestServer {
 
 /// Startet den Testserver im übergebenen Runtime-Handle.
 fn start_test_server(rt: &tokio::runtime::Runtime, mode: Mode) -> u16 {
-    let port = free_port();
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let config = Arc::new(server::Config {
         keys: vec![key],
@@ -421,7 +420,10 @@ fn start_test_server(rt: &tokio::runtime::Runtime, mode: Mode) -> u16 {
         auth_rejection_time_initial: Some(Duration::from_millis(1)),
         ..Default::default()
     });
-    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    // Direkt auf Port 0 öffnen: Ein vorher ermittelter freier Port kann bei parallelen Tests
+    // inzwischen von einem anderen Test belegt sein.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
     rt.spawn(async move {
         let listener = tokio::net::TcpListener::from_std(listener).unwrap();
@@ -779,7 +781,7 @@ fn full_user_journey_through_the_gui() {
         type_line(&mut h, "clear");
         type_line(
             &mut h,
-            r#"printf '\e[1mFett\e[0m \e[3mKursiv\e[0m \e[4mUnterstrichen\e[0m \e[9mDurch\e[0m \e[2mBlass\e[0m \e[7mInvers\e[0m\n'; for i in 0 1 2 3 4 5 6 7; do printf '\e[4%dm  \e[0m' $i; done; for i in 0 1 2 3 4 5 6 7; do printf '\e[10%dm  \e[0m' $i; done; echo; for i in 1 2 3 4 5 6; do printf '\e[3%dmFarbe%d \e[0m' $i $i; done; echo; printf '┌────────┬───────┐\n│ Umlaut │ äöüß€ │\n├────────┼───────┤\n│ Breit  │ 日本語│\n└────────┴───────┘\n▀▄█░▒▓ ✓ → λ\n'; printf '[+] Pulling 3/3\n \e[32m✔\e[0m redis Pulled\n \e[34m⠋\e[0m web  Pulling\n \e[34m⠼\e[0m db   Downloading\n \e[31m✘\e[0m alt  Error\n'; ls --color=always -la / | head -8; echo fertig-$((40+2))"#,
+            r#"printf '\e[1mFett\e[0m \e[3mKursiv\e[0m \e[4mUnterstrichen\e[0m \e[9mDurch\e[0m \e[2mBlass\e[0m \e[7mInvers\e[0m\n'; for i in 0 1 2 3 4 5 6 7; do printf '\e[4%dm  \e[0m' $i; done; for i in 0 1 2 3 4 5 6 7; do printf '\e[10%dm  \e[0m' $i; done; echo; for i in 1 2 3 4 5 6; do printf '\e[3%dmFarbe%d \e[0m' $i $i; done; echo; printf '┌────────┬───────┐\n│ Umlaut │ äöüß€ │\n├────────┼───────┤\n│ Breit  │ 日本語│\n└────────┴───────┘\n▀▄█░▒▓ ✓ → λ\n'; printf 'Nerd:     \e[44m Prompt \e[34;46m\e[30m ~/pfad \e[0;36m\e[0m  Emoji: 🚀 ☕  Pfeile: ⇄ ⌘ ⏎  Mathe: ∑ ∞ ≈\n'; printf '[+] Pulling 3/3\n \e[32m✔\e[0m redis Pulled\n \e[34m⠋\e[0m web  Pulling\n \e[34m⠼\e[0m db   Downloading\n \e[31m✘\e[0m alt  Error\n'; ls --color=always -la / | head -8; echo fertig-$((40+2))"#,
         );
         wait_for_text(&mut h, "fertig-42");
         shot(&mut h, "06-terminal-dunkel");

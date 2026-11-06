@@ -111,15 +111,31 @@ Die nötige glibc-Version hängt vom Build ab:
 | `cargo build --release` auf diesem System | glibc 2.35 | Ubuntu 22.04+, Debian 12+, aktuelle Rolling Releases |
 | `./build-portable.sh` (optional, braucht zig und cargo-zigbuild, bisher ungetestet) | glibc 2.28 | zusätzlich ältere Distributionen |
 
-Rahmen-, Block- und Braille-Zeichen (Spinner von `docker compose` oder `btop`) sowie ✓✔✗✘
-zeichnet SSHelf selbst. CJK-Zeichen und manche weitere Symbole kommen aus Systemschriften, falls vorhanden; sonst
-erscheint ein Kästchen. Ein Bedienungsproblem entsteht dadurch nicht.
+Fehlt den eingebauten Schriften ein Zeichen, sucht SSHelf wie andere Terminals eine installierte
+Systemschrift, die es enthält: zuerst über fontconfig, notfalls in allen installierten Schriften
+(so werden auch die Icons der Nerd Fonts in Shell-Prompts gefunden). Schriften werden erst bei
+Bedarf geladen. fontconfig wird zur Laufzeit nachgeladen und ist keine feste Abhängigkeit; ohne
+passende Systemschrift erscheint ein Kästchen.
+
+Die Terminalschrift ist das eingebaute Hack. Gerastert wird sie wie bei Konsole mit FreeType
+(leichtes Hinting), das zur Laufzeit geladen wird; fehlt `libfreetype.so.6`, zeichnet egui die
+Schrift etwas weicher. Zellen sind ganze Bildschirmpixel breit. Ist Hack auf dem System
+installiert (unter KDE Standard), nutzt SSHelf dessen echten Fettschnitt, sonst einen von FreeType
+erzeugten. Zeichen, die Hack nicht hat, kommen über den Schriftrückfall aus Systemschriften.
+
+Rahmen-, Block- und Braille-Zeichen (Spinner von `docker compose` oder `btop`), ✓✔✗✘ und die
+Powerline-Trenner von Shell-Prompts zeichnet SSHelf selbst, damit sie lückenlos und unabhängig von
+den Schriften erscheinen.
 
 ## Entwicklung
 
     cargo test      # Unit- und End-to-End-Tests, braucht sshd, ssh-keygen, ssh-agent und eine GPU
 
-Mit `SSHELF_SHOTS=<ordner>` speichern die Oberflächentests Screenshots.
+Mit `SSHELF_SHOTS=<ordner>` speichern die Oberflächentests Screenshots. Die Tests rendern über
+wgpu; um die Darstellung im echten OpenGL-Renderer zu prüfen, gibt es eine Diagnose:
+
+    cargo build --release --features selfshot
+    SSHELF_SELFSHOT=/tmp/terminal.png target/release/sshelf
 
 | Datei | Inhalt |
 |---|---|
@@ -128,6 +144,8 @@ Mit `SSHELF_SHOTS=<ordner>` speichern die Oberflächentests Screenshots.
 | `src/config.rs` | INI-Konfiguration, Datenbankpfad |
 | `src/tray.rs` | Symbol in der Statusleiste |
 | `src/desktop.rs` | Programmsymbol, Eintrag im Anwendungsmenü |
+| `src/fonts.rs` | Schriftrückfall auf Systemschriften |
+| `src/glyphs.rs` | Terminalschrift mit FreeType rastern |
 | `src/keys.rs` | Schlüssel prüfen und erzeugen |
 | `src/ssh.rs` | Verbindungsaufbau, Anmeldung, Jump-Hosts |
 | `src/term.rs` | Terminal: Eingabe und Darstellung |

@@ -451,12 +451,39 @@ fn mark(c: char) -> Option<Mark> {
     })
 }
 
+/// Powerline-Trenner der Shell-Prompts (U+E0B0..U+E0B3). Selbst gezeichnet, damit sie die volle
+/// Zeilenhöhe füllen und die Farbsegmente nahtlos verbinden.
+fn powerline(c: char) -> Option<(bool, bool)> {
+    // (zeigt nach rechts, gefüllt)
+    Some(match c {
+        '\u{e0b0}' => (true, true),
+        '\u{e0b1}' => (true, false),
+        '\u{e0b2}' => (false, true),
+        '\u{e0b3}' => (false, false),
+        _ => return None,
+    })
+}
+
 fn is_cell_graphic(c: char) -> bool {
-    box_weights(c).is_some() || block_rects(c).is_some() || braille_dots(c).is_some() || mark(c).is_some()
+    box_weights(c).is_some()
+        || block_rects(c).is_some()
+        || braille_dots(c).is_some()
+        || mark(c).is_some()
+        || powerline(c).is_some()
 }
 
 /// Zeichnet ein Rahmen- oder Blockzeichen exakt in seine Zelle.
 fn paint_cell_graphic(painter: &egui::Painter, cell: Rect, c: char, color: Color32) {
+    if let Some((right, filled)) = powerline(c) {
+        let (back, tip) = if right { (cell.left(), cell.right()) } else { (cell.right(), cell.left()) };
+        let points = vec![Pos2::new(back, cell.top()), Pos2::new(tip, cell.center().y), Pos2::new(back, cell.bottom())];
+        if filled {
+            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        } else {
+            painter.add(egui::Shape::line(points, Stroke::new(1.0, color)));
+        }
+        return;
+    }
     if let Some(bits) = braille_dots(c) {
         // Bit 0..2 und 6: linke Spalte von oben, Bit 3..5 und 7: rechte Spalte.
         const DOTS: [(f32, f32); 8] = [
@@ -546,6 +573,31 @@ fn paint_cell_graphic(painter: &egui::Painter, cell: Rect, c: char, color: Color
 
 // --- Widget ------------------------------------------------------------------------------
 
+/// Zellgröße auf ganze Bildschirmpixel gerundet. Sonst läge fast jedes Zeichen auf einer halben
+/// Pixelposition und würde über zwei Pixel verschmiert (bei Hack 14 px wären es 8,43 Pixel).
+pub fn cell_size(advance: f32, row_height: f32, pixels_per_point: f32) -> (f32, f32) {
+    let w = (advance * pixels_per_point).round().max(1.0) / pixels_per_point;
+    let h = (row_height * pixels_per_point).ceil().max(1.0) / pixels_per_point;
+    (w, h)
+}
+
+/// Legt einen Textlauf so an, dass jedes Zeichen genau eine Zelle weit vorrückt.
+pub fn layout_run(text: &str, font: &FontId, color: Color32, italic: bool, letter_spacing: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color,
+            italics: italic,
+            extra_letter_spacing: letter_spacing,
+            ..Default::default()
+        },
+    );
+    job
+}
+
 /// Pro Sitzung gemerkter Zustand der Darstellung.
 #[derive(Default)]
 pub struct ViewState {
@@ -612,8 +664,22 @@ pub fn show(
     take_focus: bool,
 ) {
     let font = FontId::monospace(font_size);
-    let (cell_w, cell_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-    let (cell_w, cell_h) = (cell_w.max(1.0), cell_h.ceil().max(1.0));
+    // Echter Fettschnitt, wenn `fonts::install` ihn gefunden hat; sonst Doppeldruck.
+    let bold_font = FontId::new(font_size, egui::FontFamily::Name(crate::fonts::BOLD_FAMILY.into()));
+    let real_bold = ui.fonts(|f| f.families().contains(&bold_font.family));
+    let ppp = ui.ctx().pixels_per_point();
+    let (advance, row_height) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    // Zeichen mit FreeType rastern, wenn vorhanden (schärfer, wie Konsole); sonst egui.
+    let freetype = crate::glyphs::cache(ui.ctx(), (font_size * ppp).round().max(4.0) as u32, crate::fonts::hack_bold_bytes);
+    let (cell_w, cell_h) = match &freetype {
+        Some(ft) => {
+            let m = ft.lock().metrics;
+            (m.advance as f32 / ppp, m.height as f32 / ppp)
+        }
+        None => cell_size(advance, row_height, ppp),
+    };
+    // Abstand, der aus dem natürlichen Zeichenvorschub genau die Zellbreite macht.
+    let letter_spacing = cell_w - advance;
 
     let full = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(full, Sense::click_and_drag());
@@ -903,14 +969,15 @@ pub fn show(
     let cursor_row = cursor.point.line.0 + offset;
     let colors = content.colors;
 
-    let origin = rect.min.round();
-    let cell_x = |col: usize| (origin.x + col as f32 * cell_w).round();
+    // Ursprung auf eine Pixelkante legen; da die Zellen ganze Pixel breit sind, liegen dann alle
+    // Zeichen auf Pixelkanten.
+    let origin = Pos2::new((rect.min.x * ppp).round() / ppp, (rect.min.y * ppp).round() / ppp);
+    let cell_x = |col: usize| origin.x + col as f32 * cell_w;
     let cell_y = |row: i32| origin.y + row as f32 * cell_h;
 
     let mut text_shapes: Vec<(usize, i32, Run)> = Vec::new();
     let mut lines: Vec<(egui::Pos2, egui::Pos2, Color32)> = Vec::new();
     let mut graphics: Vec<(usize, i32, char, Color32)> = Vec::new();
-    let mut wants_cjk = false;
     let mut bg_run: Option<(i32, usize, usize, Color32)> = None;
     let mut current: Option<(i32, Run)> = None;
 
@@ -963,7 +1030,6 @@ pub fn show(
         if graphic && !hidden {
             graphics.push((col, row, c, fg));
         }
-        wants_cjk |= width == 2 && !hidden;
         let drawable = c != ' ' && c != '\0' && c != '\t' && !hidden && !graphic;
 
         // Nur druckbares ASCII in einem Rutsch zeichnen, alles andere exakt pro Zelle.
@@ -1014,9 +1080,6 @@ pub fn show(
         let cell = Rect::from_min_max(Pos2::new(cell_x(col), cell_y(row)), Pos2::new(cell_x(col + 1), cell_y(row + 1)));
         paint_cell_graphic(&painter, cell, c, color);
     }
-    if wants_cjk {
-        crate::theme::load_cjk_font(ui.ctx());
-    }
 
     // Cursor unter dem Text zeichnen, das Zeichen darunter wird danach invertiert ausgegeben.
     let mut cursor_cell: Option<(usize, i32)> = None;
@@ -1051,22 +1114,38 @@ pub fn show(
         }
     }
 
-    let paint_text = |x: f32, y: f32, run_text: &str, color: Color32, bold: bool, italic: bool| {
-        let galley = if italic {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                run_text,
-                0.0,
-                egui::TextFormat { font_id: font.clone(), color, italics: true, ..Default::default() },
-            );
-            ui.fonts_mut(|f| f.layout_job(job))
-        } else {
-            ui.fonts_mut(|f| f.layout_no_wrap(run_text.to_owned(), font.clone(), color))
+    let mut ft_lock = freetype.as_ref().map(|f| f.lock());
+    let mut mesh = ft_lock.as_ref().map(|f| egui::Mesh::with_texture(f.texture_id()));
+    let mut paint_text = |x: f32, y: f32, run_text: &str, color: Color32, bold: bool, italic: bool| {
+        let egui_text = |text: &str, x: f32| {
+            if bold && real_bold {
+                let spacing = cell_w - ui.fonts_mut(|f| f.glyph_width(&bold_font, 'M'));
+                let galley = ui.fonts_mut(|f| f.layout_job(layout_run(text, &bold_font, color, italic, spacing)));
+                painter.galley(Pos2::new(x, y), galley, color);
+                return;
+            }
+            let galley = ui.fonts_mut(|f| f.layout_job(layout_run(text, &font, color, italic, letter_spacing)));
+            painter.galley(Pos2::new(x, y), galley.clone(), color);
+            if bold {
+                // Kein Fettschnitt: um genau ein Bildschirmpixel versetzt doppelt zeichnen.
+                painter.galley(Pos2::new(x + 1.0 / ppp, y), galley, color);
+            }
         };
-        painter.galley(Pos2::new(x, y), galley.clone(), color);
-        if bold {
-            // Die eingebaute Schrift hat keinen Fettschnitt, also leicht versetzt doppelt zeichnen.
-            painter.galley(Pos2::new(x + 0.6, y), galley, color);
+        let (Some(ft), Some(mesh)) = (ft_lock.as_mut(), mesh.as_mut()) else {
+            egui_text(run_text, x);
+            return;
+        };
+        for (i, c) in run_text.chars().enumerate() {
+            let cx = x + i as f32 * cell_w;
+            match ft.glyph(c, bold, italic) {
+                Some(g) if g.size != Vec2::ZERO => {
+                    let rect = Rect::from_min_size(Pos2::new(cx, y) + g.offset / ppp, g.size / ppp);
+                    mesh.add_rect_with_uv(rect, g.uv, color);
+                }
+                Some(_) => {}
+                // FreeType hat das Zeichen nicht (z. B. CJK, Emoji): egui mit Systemschriften.
+                None => egui_text(&c.to_string(), cx),
+            }
         }
     };
 
@@ -1100,6 +1179,12 @@ pub fn show(
         }
         paint_text(cell_x(*col), y, &run.text, run.fg, run.bold, run.italic);
     }
+    if let Some(mesh) = mesh.take()
+        && !mesh.is_empty()
+    {
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    drop(ft_lock);
     for (a, b, c) in lines {
         painter.line_segment([a, b], Stroke::new(1.0, c));
     }
@@ -1301,6 +1386,36 @@ mod tests {
         assert_eq!(braille_dots('⣿'), Some(0xff));
         assert_eq!(braille_dots('a'), None);
         assert_eq!(mark('✘'), Some(Mark::HeavyCross));
+        assert_eq!(powerline('\u{e0b0}'), Some((true, true)));
+        assert_eq!(powerline('\u{e0b3}'), Some((false, false)));
+    }
+
+    #[test]
+    fn cells_are_whole_pixels() {
+        assert_eq!(cell_size(8.43, 16.4, 1.0), (8.0, 17.0));
+        let (w, h) = cell_size(8.43, 16.4, 1.25);
+        assert_eq!((w * 1.25, h * 1.25), (11.0, 21.0));
+    }
+
+    /// Jedes Zeichen eines Laufs muss genau auf seiner Zellgrenze beginnen.
+    #[test]
+    fn glyphs_land_exactly_on_cell_boundaries() {
+        let ctx = egui::Context::default();
+        crate::theme::apply_style(&ctx);
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            let font = FontId::monospace(14.0);
+            let ppp = ui.ctx().pixels_per_point();
+            let (advance, row) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+            let (cell_w, _) = cell_size(advance, row, ppp);
+            assert_ne!(advance, cell_w, "Testvoraussetzung: natürliche Breite ist kein ganzer Pixel");
+            let text = "drwxr-xr-x config docker-compose.yml";
+            let galley = ui.fonts_mut(|f| f.layout_job(layout_run(text, &font, Color32::WHITE, false, cell_w - advance)));
+            for (i, g) in galley.rows[0].glyphs.iter().enumerate() {
+                let expected = i as f32 * cell_w;
+                assert!((g.pos.x - expected).abs() < 0.01, "Zeichen {i} ({:?}) bei {} statt {expected}", g.chr, g.pos.x);
+            }
+        });
+        out.textures_delta.clear();
     }
 
     #[test]
