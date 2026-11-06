@@ -157,3 +157,9 @@ wgpu; um die Darstellung im echten OpenGL-Renderer zu prüfen, gibt es eine Diag
 | `src/term.rs` | Terminal: Eingabe und Darstellung |
 | `src/app.rs` | Oberfläche |
 | `src/e2e_tests.rs` | End-to-End-Tests gegen einen echten `sshd` |
+
+## Lizenz
+
+SSHelf steht wahlweise unter der [MIT-Lizenz](LICENSE-MIT) oder der
+[Apache-Lizenz 2.0](LICENSE-APACHE). Die Lizenzen der verwendeten Bibliotheken und der
+eingebetteten Schriften stehen in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
