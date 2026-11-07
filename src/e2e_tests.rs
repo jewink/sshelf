@@ -633,7 +633,7 @@ fn ui_icons_exist_in_builtin_fonts() {
     let ctx = egui::Context::default();
     let mut output = ctx.run_ui(Default::default(), |ui| {
         ui.fonts_mut(|f| {
-            for c in "🔑🔒🌓⚙🖧🔍✏▶📋🗑×+«»".chars() {
+            for c in "🔑🔒🌓⚙🖧🔍✏▶📋🗑×+«»ℹ".chars() {
                 assert!(f.has_glyph(&egui::FontId::proportional(14.0), c), "Symbol fehlt: {c}");
             }
         });
@@ -786,6 +786,35 @@ fn full_user_journey_through_the_gui() {
         wait_for_text(&mut h, "fertig-42");
         shot(&mut h, "06-terminal-dunkel");
 
+        // Markieren mit Ziehen über den oberen Rand: Das Terminal scrollt mit, sodass auch
+        // Zeilen außerhalb des sichtbaren Bereichs in die Auswahl kommen.
+        type_line(&mut h, "clear; for i in $(seq 1 150); do echo zeile-$i; done");
+        wait_for_text(&mut h, "zeile-150");
+        assert_eq!(app(&h).test_display_offset(), 0);
+        let from = egui::pos2(700.0, 600.0);
+        h.hover_at(from);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        // Deutlich über das Terminal hinaus (in die Tableiste) ziehen und dort halten.
+        let above = egui::pos2(700.0, 20.0);
+        for _ in 0..40 {
+            h.hover_at(above);
+            h.step();
+        }
+        let scrolled = app(&h).test_display_offset();
+        h.event(egui::Event::PointerButton { pos: above, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.step();
+        assert!(scrolled > 10, "beim Markieren über den Rand muss das Terminal scrollen, Versatz {scrolled}");
+        let selected = app(&h).test_selection().unwrap_or_default();
+        assert!(selected.contains("zeile-150") || selected.contains("zeile-14"), "Auswahl reicht bis unten");
+        let first_visible_before = 150 - 40; // grob: vorher sichtbarer Anfang
+        let earliest = selected.lines().filter_map(|l| l.trim().strip_prefix("zeile-")?.parse::<u32>().ok()).min().unwrap_or(999);
+        assert!(earliest < first_visible_before, "Auswahl enthält Zeilen aus dem Verlauf, früheste {earliest}");
+        // Tippen springt wieder ans Ende.
+        type_line(&mut h, "clear");
+        settle(&mut h);
+
         // Sperren versteckt alles, die Sitzung läuft weiter.
         click(&mut h, "Sperren");
         assert!(!app(&h).test_unlocked());
@@ -803,7 +832,7 @@ fn full_user_journey_through_the_gui() {
         wait_for_text(&mut h, "nach-sperre-42");
 
         // Seiten für die Sichtprüfung.
-        click(&mut h, "Schlüssel");
+        click(&mut h, "Schlüssel & Hosts");
         shot(&mut h, "08-schluessel");
         click(&mut h, "Bekannte Hosts");
         assert_eq!(app(&h).test_known_hosts().len(), 1);
@@ -813,7 +842,7 @@ fn full_user_journey_through_the_gui() {
         click(&mut h, "Hell");
         settle(&mut h);
         shot(&mut h, "11-einstellungen-hell");
-        click(&mut h, "Schlüssel");
+        click(&mut h, "Schlüssel & Hosts");
         shot(&mut h, "11b-schluessel-hell");
         click(&mut h, "Einstellungen");
 
@@ -1260,6 +1289,59 @@ fn terminal_font_can_be_chosen_and_is_remembered() {
     click(&mut h, "Entsperren");
     assert_eq!(app(&h).test_config().terminal_font, wanted, "Schrift beim Neustart geladen");
     assert_eq!(app(&h).test_font_size(), 12.0);
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collapsed_rail_keeps_groups_collapsed() {
+    let dir = temp_dir("railgroups");
+    let mut h = gui(&dir.join("sshelf.db"), true);
+    setup_with_connection(&mut h, "Ohne");
+    create_connection_in(&mut h, "Web 1", None, Some("Kunde A"));
+    create_connection_in(&mut h, "Mail", None, Some("Kunde B"));
+    click(&mut h, "Gruppe Kunde A");
+    assert!(h.query_by_label("Web 1").is_none());
+
+    // Einklappen: Die zugeklappte Gruppe bleibt zu, die offene zeigt ihre Verbindung.
+    click(&mut h, "«");
+    assert!(h.query_by_label("Web 1").is_none(), "zugeklappte Gruppe darf in der Leiste nicht aufgehen");
+    assert!(h.query_by_label("Mail").is_some() && h.query_by_label("Ohne").is_some());
+    shot(&mut h, "33-leiste-gruppen");
+    // In der Leiste aufklappen; das gilt dann auch für die ausgeklappte Seitenleiste.
+    click(&mut h, "Gruppe Kunde A");
+    assert!(h.query_by_label("Web 1").is_some());
+    click(&mut h, "»");
+    assert!(h.query_by_label("Web 1").is_some());
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn about_page_shows_version_and_github_link() {
+    let dir = temp_dir("about");
+    let mut h = gui(&dir.join("sshelf.db"), true);
+    setup_with_connection(&mut h, "Eins");
+    click(&mut h, "Über");
+    h.get_by_label_contains(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+    h.get_by_label("https://github.com/jewink/sshelf");
+    shot(&mut h, "34-ueber");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keys_and_known_hosts_share_one_entry() {
+    let dir = temp_dir("keystabs");
+    let mut h = gui(&dir.join("sshelf.db"), true);
+    setup_with_connection(&mut h, "Eins");
+    assert!(h.query_by_label("Bekannte Hosts").is_none(), "kein eigener Eintrag mehr in der Seitenleiste");
+    click(&mut h, "Schlüssel & Hosts");
+    h.get_by_label("Importieren…");
+    click(&mut h, "Bekannte Hosts");
+    h.get_by_label_contains("Hostschlüssel, denen du");
+    click(&mut h, "Schlüssel");
+    h.get_by_label("Importieren…");
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -202,6 +202,16 @@ impl Shared {
         self.dark.store(dark, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
+    }
+
+    #[cfg(test)]
+    pub fn display_offset(&self) -> usize {
+        self.term.lock().grid().display_offset()
+    }
+
     /// Gesamter sichtbarer Text, für Tests.
     #[cfg(test)]
     pub fn screen_text(&self) -> String {
@@ -573,6 +583,25 @@ fn paint_cell_graphic(painter: &egui::Painter, cell: Rect, c: char, color: Color
 
 // --- Widget ------------------------------------------------------------------------------
 
+/// Wie viele Zeilen beim Markieren über den Rand hinaus gescrollt werden (positiv: nach oben in
+/// den Verlauf). `rest` sammelt Bruchteile über die Frames.
+fn autoscroll_lines(rest: &mut f32, pointer_y: f32, rect: Rect, cell_h: f32, dt: f32) -> i32 {
+    let distance = if pointer_y < rect.top() {
+        rect.top() - pointer_y
+    } else if pointer_y > rect.bottom() {
+        -(pointer_y - rect.bottom())
+    } else {
+        *rest = 0.0;
+        return 0;
+    };
+    // 6 Zeilen pro Sekunde direkt am Rand, plus 10 pro Zeilenhöhe Abstand, höchstens 200.
+    let speed = (6.0 + distance.abs() / cell_h * 10.0).min(200.0);
+    *rest += speed * dt.clamp(0.0, 0.1) * distance.signum();
+    let lines = rest.trunc() as i32;
+    *rest -= lines as f32;
+    lines
+}
+
 /// Zellgröße auf ganze Bildschirmpixel gerundet. Sonst läge fast jedes Zeichen auf einer halben
 /// Pixelposition und würde über zwei Pixel verschmiert (bei Hack 14 px wären es 8,43 Pixel).
 pub fn cell_size(advance: f32, row_height: f32, pixels_per_point: f32) -> (f32, f32) {
@@ -602,6 +631,8 @@ pub fn layout_run(text: &str, font: &FontId, color: Color32, italic: bool, lette
 #[derive(Default)]
 pub struct ViewState {
     scroll_rest: f32,
+    /// Bruchteil einer Zeile beim automatischen Scrollen während einer Markierung.
+    autoscroll_rest: f32,
     selecting: bool,
     pressed_button: Option<u8>,
     last_mouse_cell: Option<(usize, usize)>,
@@ -953,11 +984,20 @@ pub fn show(
                 };
                 term.selection = Some(Selection::new(ty, to_point(col, row), side));
                 view.selecting = true;
-            } else if view.selecting
-                && ui.input(|i| i.pointer.primary_down())
-                && let Some(sel) = term.selection.as_mut()
-            {
-                sel.update(to_point(col, row), side);
+            } else if view.selecting && ui.input(|i| i.pointer.primary_down()) {
+                // Über den Rand hinaus gezogen: Verlauf nachscrollen, damit sich auch Text
+                // außerhalb des sichtbaren Bereichs markieren lässt. Je weiter weg, desto schneller.
+                let lines = autoscroll_lines(&mut view.autoscroll_rest, pos.y, rect, cell_h, ui.input(|i| i.stable_dt));
+                if lines != 0 {
+                    term.scroll_display(Scroll::Delta(lines));
+                }
+                if pos.y < rect.top() || pos.y > rect.bottom() {
+                    ui.ctx().request_repaint();
+                }
+                let offset_now = term.grid().display_offset() as i32;
+                if let Some(sel) = term.selection.as_mut() {
+                    sel.update(Point::new(Line(row as i32 - offset_now), Column(col)), side);
+                }
             }
             if view.selecting && ui.input(|i| i.pointer.primary_released()) {
                 view.selecting = false;
@@ -1396,6 +1436,30 @@ mod tests {
         assert_eq!(mark('✘'), Some(Mark::HeavyCross));
         assert_eq!(powerline('\u{e0b0}'), Some((true, true)));
         assert_eq!(powerline('\u{e0b3}'), Some((false, false)));
+    }
+
+    #[test]
+    fn autoscroll_speed_depends_on_distance() {
+        let rect = Rect::from_min_max(Pos2::new(0.0, 100.0), Pos2::new(500.0, 500.0));
+        let mut rest = 0.0;
+        assert_eq!(autoscroll_lines(&mut rest, 300.0, rect, 17.0, 0.016), 0, "innen kein Scrollen");
+        let mut up = 0;
+        for _ in 0..60 {
+            up += autoscroll_lines(&mut rest, 95.0, rect, 17.0, 1.0 / 60.0);
+        }
+        assert!((5..=8).contains(&up), "knapp über dem Rand etwa 6 Zeilen pro Sekunde, war {up}");
+        rest = 0.0;
+        let mut far = 0;
+        for _ in 0..60 {
+            far += autoscroll_lines(&mut rest, 100.0 - 170.0, rect, 17.0, 1.0 / 60.0);
+        }
+        assert!(far > 60, "weiter weg deutlich schneller, war {far}");
+        rest = 0.0;
+        let mut down = 0;
+        for _ in 0..60 {
+            down += autoscroll_lines(&mut rest, 520.0, rect, 17.0, 1.0 / 60.0);
+        }
+        assert!(down < 0, "unter dem Rand zurück nach unten");
     }
 
     #[test]

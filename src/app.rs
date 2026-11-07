@@ -23,8 +23,8 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 const MIN_PASSWORD: usize = 8;
-const PREVIEW: &str = "\x1b[1;32mjens@server\x1b[0m:\x1b[1;34m~/docker\x1b[0m$ ls -l\r\n\
-drwxr-xr-x 2 jens jens 4096 \x1b[1;34matuin\x1b[0m  \x1b[32m\u{2714}\x1b[0m Pulled  0O 1lI {}[]=>\r\n\
+const PREVIEW: &str = "\x1b[1;32msshelf@server\x1b[0m:\x1b[1;34m~/\x1b[0m$ ls -l\r\n\
+drwxr-xr-x 2 sshelf sshelf 4096 \x1b[1;34msshelf\x1b[0m  \x1b[32m\u{2714}\x1b[0m 0O 1lI {}[]\u{21d2}\r\n\
 Umlaute: \u{e4}\u{f6}\u{fc}\u{df}  \x1b[3mkursiv\x1b[0m  \x1b[1mfett\x1b[0m  \u{2500}\u{252c}\u{2500} \u{280b}\u{2819}\u{2839}\r\n";
 const SIDEBAR_MIN: f32 = 220.0;
 const SIDEBAR_MAX: f32 = 560.0;
@@ -36,6 +36,7 @@ pub enum Page {
     Keys,
     KnownHosts,
     Settings,
+    About,
 }
 
 struct Session {
@@ -181,6 +182,7 @@ pub struct App {
     collapsed_groups: BTreeSet<String>,
     /// Kleines Terminal mit Beispieltext für die Schriftauswahl.
     preview: Option<(Arc<Shared>, mpsc::UnboundedSender<Cmd>, ViewState)>,
+    about_icon: Option<egui::TextureHandle>,
     desktop: Option<desktop::Locations>,
     /// Abgelegter Starter neben dem Programm (Hinweis in den Einstellungen).
     launcher: Option<PathBuf>,
@@ -334,6 +336,21 @@ fn stored_font_size(store: &Store) -> f32 {
     store.get_setting("font_size").and_then(|s| s.parse().ok()).unwrap_or(14.0f32).clamp(9.0, 28.0)
 }
 
+/// Überschrift und Reiter der Seite „Schlüssel & Hosts“. Gibt den angeklickten Reiter zurück.
+fn keys_tabs(ui: &mut Ui, current: Page) -> Option<Page> {
+    ui.heading("Schlüssel & Hosts");
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        for (page, label) in [(Page::Keys, "Schlüssel"), (Page::KnownHosts, "Bekannte Hosts")] {
+            if ui.selectable_label(current == page, label).clicked() && current != page {
+                chosen = Some(page);
+            }
+        }
+    });
+    ui.add_space(2.0);
+    chosen
+}
+
 /// Zwei Spalten nebeneinander; `frac` ist der Anteil der linken Spalte.
 fn split(ui: &mut Ui, frac: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
     let gap = 12.0;
@@ -424,6 +441,7 @@ impl App {
             saved_config: Config::default(),
             collapsed_groups: BTreeSet::new(),
             preview: None,
+            about_icon: None,
             desktop: desktop::Locations::user().ok(),
             launcher: None,
         };
@@ -442,8 +460,9 @@ impl App {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         self.apply_theme();
         self.hide_on_close = false;
-        // Die Vorschau hängt am alten Fenster-Kontext.
+        // Vorschau und Symbol hängen am alten Fenster-Kontext.
         self.preview = None;
+        self.about_icon = None;
         self.tray_state.set_ctx(Some(ctx.clone()));
         for s in &self.sessions {
             s.shared.set_repaint(Some(ctx.clone()));
@@ -1048,13 +1067,14 @@ impl App {
                 let _ = self.store.lock().set_setting("theme", self.theme.as_str());
             }
             let cur = if self.active.is_none() { Some(self.page) } else { None };
+            if self.nav_item(ui, c, "ℹ", "Über", cur == Some(Page::About)).clicked() {
+                self.open_page(Page::About);
+            }
             if self.nav_item(ui, c, "⚙", "Einstellungen", cur == Some(Page::Settings)).clicked() {
                 self.open_page(Page::Settings);
             }
-            if self.nav_item(ui, c, "🖧", "Bekannte Hosts", cur == Some(Page::KnownHosts)).clicked() {
-                self.open_page(Page::KnownHosts);
-            }
-            if self.nav_item(ui, c, "🔑", "Schlüssel", cur == Some(Page::Keys)).clicked() {
+            let keys_open = matches!(cur, Some(Page::Keys | Page::KnownHosts));
+            if self.nav_item(ui, c, "🔑", "Schlüssel & Hosts", keys_open).clicked() {
                 self.open_page(Page::Keys);
             }
             ui.separator();
@@ -1187,6 +1207,7 @@ impl App {
         let nav_height = 150.0;
         let list_height = (ui.available_height() - nav_height).max(40.0);
         let list = self.connections.clone();
+        let mut toggle = None;
         egui::ScrollArea::vertical()
             .id_salt("rail")
             .max_height(list_height)
@@ -1194,11 +1215,29 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
+                    let mut last_group: Option<&str> = None;
                     for rec in &list {
-                        self.ui_rail_avatar(ui, c, rec, dark);
+                        let group = rec.group.as_str();
+                        if last_group != Some(group) {
+                            last_group = Some(group);
+                            if !group.is_empty() {
+                                let count = list.iter().filter(|r| r.group == group).count();
+                                let collapsed = self.collapsed_groups.contains(group);
+                                if self.ui_rail_group(ui, c, group, count, collapsed).clicked() {
+                                    toggle = Some(group.to_owned());
+                                }
+                            }
+                        }
+                        // Wie in der ausgeklappten Leiste: zugeklappte Gruppen bleiben zu.
+                        if group.is_empty() || !self.collapsed_groups.contains(group) {
+                            self.ui_rail_avatar(ui, c, rec, dark);
+                        }
                     }
                 });
             });
+        if let Some(g) = toggle {
+            self.toggle_group(&g);
+        }
         ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let icon = |text: &str| egui::Button::new(RichText::new(text).size(15.0)).frame(false).min_size(Vec2::splat(30.0));
@@ -1208,14 +1247,40 @@ impl App {
             if ui.add(icon("⚙")).on_hover_text("Einstellungen").clicked() {
                 self.open_page(Page::Settings);
             }
-            if ui.add(icon("🖧")).on_hover_text("Bekannte Hosts").clicked() {
-                self.open_page(Page::KnownHosts);
+            if ui.add(icon("ℹ")).on_hover_text("Über").clicked() {
+                self.open_page(Page::About);
             }
-            if ui.add(icon("🔑")).on_hover_text("Schlüssel").clicked() {
+            if ui.add(icon("🔑")).on_hover_text("Schlüssel & Hosts").clicked() {
                 self.open_page(Page::Keys);
             }
             ui.separator();
         });
+    }
+
+    /// Gruppe in der eingeklappten Leiste: zugeklappt ein Kästchen mit Kürzel und Anzahl,
+    /// aufgeklappt eine schmale Trennlinie. Ein Klick klappt um.
+    fn ui_rail_group(&self, ui: &mut Ui, c: &Colors, group: &str, count: usize, collapsed: bool) -> egui::Response {
+        ui.add_space(2.0);
+        let height = if collapsed { 34.0 } else { 14.0 };
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, height), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Gruppe {group}")));
+        let hint = if collapsed { "aufklappen" } else { "zuklappen" };
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!("{group} ({count}) – Klick zum {hint}"));
+        let painter = ui.painter();
+        if collapsed {
+            let fill = if resp.hovered() { c.accent_soft } else { c.panel };
+            painter.rect(rect.shrink2(Vec2::new(2.0, 0.0)), 7.0, fill, Stroke::new(1.0, c.border), egui::StrokeKind::Inside);
+            let short: String = group.chars().filter(|ch| !ch.is_whitespace()).take(2).collect::<String>().to_uppercase();
+            painter.text(rect.center() - Vec2::new(0.0, 5.0), egui::Align2::CENTER_CENTER, short, FontId::proportional(12.0), c.text);
+            painter.text(rect.center() + Vec2::new(0.0, 9.0), egui::Align2::CENTER_CENTER, count.to_string(), FontId::proportional(10.0), c.muted);
+        } else {
+            let color = if resp.hovered() { c.accent } else { c.border };
+            let y = rect.center().y;
+            painter.line_segment([egui::pos2(rect.left() + 6.0, y), egui::pos2(rect.right() - 6.0, y)], Stroke::new(1.0, color));
+        }
+        resp
     }
 
     fn ui_rail_avatar(&mut self, ui: &mut Ui, c: &Colors, rec: &ConnectionRec, dark: bool) {
@@ -1853,9 +1918,11 @@ impl App {
         let mut copy = None;
         let mut del = None;
         let mut rename = None;
+        let mut switch = None;
         Self::page_frame(ui, |ui| {
+            switch = keys_tabs(ui, Page::Keys);
             ui.horizontal(|ui| {
-                ui.heading("Schlüssel");
+                ui.label(RichText::new("Schlüssel").size(17.0).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add(primary_button(c, "Importieren…")).clicked() {
                         new_form = Some(false);
@@ -1899,6 +1966,9 @@ impl App {
                 ui.add_space(4.0);
             }
         });
+        if let Some(page) = switch {
+            self.page = page;
+        }
         if let Some(generate) = new_form {
             self.key_form = Some(KeyForm { generate, save_passphrase: true, ..Default::default() });
         }
@@ -1917,8 +1987,9 @@ impl App {
     fn ui_known_hosts(&mut self, ui: &mut Ui, c: &Colors) {
         let list = self.known_hosts.clone();
         let mut forget = None;
+        let mut switch = None;
         Self::page_frame(ui, |ui| {
-            ui.heading("Bekannte Hosts");
+            switch = keys_tabs(ui, Page::KnownHosts);
             ui.label(RichText::new("Hostschlüssel, denen du beim Verbinden vertraut hast. Ändert sich einer, wird die Verbindung blockiert.").color(c.muted));
             ui.add_space(6.0);
             if list.is_empty() {
@@ -1943,8 +2014,69 @@ impl App {
                 ui.add_space(4.0);
             }
         });
+        if let Some(page) = switch {
+            self.page = page;
+        }
         if let Some((h, p)) = forget {
             self.confirm = Some(Confirm::ForgetHost(h, p));
+        }
+    }
+
+    fn ui_about(&mut self, ui: &mut Ui, c: &Colors) {
+        const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+        let icon = self.about_icon.get_or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied([96, 96], &crate::desktop::rgba(96));
+            ui.ctx().load_texture("about-icon", image, egui::TextureOptions::LINEAR)
+        });
+        let icon = egui::load::SizedTexture::new(icon.id(), Vec2::splat(72.0));
+        let mut open = false;
+        let mut copy = false;
+        Self::page_frame(ui, |ui| {
+            ui.heading("Über");
+            ui.add_space(6.0);
+            soft_card(c).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(icon));
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.label(RichText::new("SSHelf").size(22.0).strong());
+                        ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(c.muted));
+                        ui.label(RichText::new(env!("CARGO_PKG_DESCRIPTION")).color(c.muted));
+                    });
+                });
+                ui.add_space(8.0);
+                field_label(ui, c, "Projektseite");
+                ui.horizontal(|ui| {
+                    open = ui
+                        .add(egui::Button::new(RichText::new(REPO).color(c.accent)).frame(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Im Browser öffnen")
+                        .clicked();
+                    copy = ui.small_button("Kopieren").clicked();
+                });
+                field_label(ui, c, "Lizenz");
+                ui.label("MIT oder Apache-2.0, nach Wahl");
+                field_label(ui, c, "Autor");
+                ui.label(env!("CARGO_PKG_AUTHORS").replace(':', ", "));
+            });
+        });
+        if open {
+            // Über die Desktop-Umgebung öffnen, das braucht keine zusätzliche Bibliothek.
+            let started = std::process::Command::new("xdg-open")
+                .arg(REPO)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if started.is_err() {
+                ui.ctx().copy_text(REPO.to_owned());
+                self.notify("Kein Browser gefunden. Der Link wurde kopiert.", true);
+            }
+        }
+        if copy {
+            ui.ctx().copy_text(REPO.to_owned());
+            self.notify("Link kopiert", false);
         }
     }
 
@@ -2518,6 +2650,7 @@ impl App {
                     Page::Editor => self.ui_editor(ui, &c, dark),
                     Page::Keys => self.ui_keys(ui, &c),
                     Page::KnownHosts => self.ui_known_hosts(ui, &c),
+                    Page::About => self.ui_about(ui, &c),
                     Page::Settings => self.ui_settings(ui, &c),
                 }
             }
@@ -2583,6 +2716,12 @@ impl App {
     }
     pub fn test_config(&self) -> &Config {
         &self.config
+    }
+    pub fn test_selection(&self) -> Option<String> {
+        self.sessions.last().and_then(|s| s.shared.selection_text())
+    }
+    pub fn test_display_offset(&self) -> usize {
+        self.sessions.last().map_or(0, |s| s.shared.display_offset())
     }
     pub fn test_font_size(&self) -> f32 {
         self.font_size

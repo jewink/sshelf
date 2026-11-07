@@ -3,6 +3,7 @@ name = "sshelf"
 version = "0.1.0"
 edition = "2024"
 description = "Schlanke SSH-Verbindungsverwaltung mit eingebautem Terminal"
+authors = ["jeWink <jens@jewink.it>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jewink/sshelf"
 

@@ -101,6 +101,7 @@ wie gewohnt, damit sie nie unerreichbar wird.
 | Strg+Umschalt+W | Tab schließen |
 | Umschalt+Bild↑/↓, Mausrad | Im Verlauf blättern |
 | Umschalt+Ziehen | Text auswählen, auch wenn ein Programm die Maus nutzt |
+| Über den Rand ziehen | Beim Markieren scrollt der Verlauf mit, je weiter weg, desto schneller |
 
 ## Systemvoraussetzungen
 
